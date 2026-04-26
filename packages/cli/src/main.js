@@ -7,7 +7,48 @@ const { accounts, email, imap, smtp, sync } = require("@mailbox/core");
 const { digest, monitor, inbox } = require("@mailbox/workflows");
 
 function _printTextNotImplemented(label) {
-  process.stdout.write(`${label} (text mode) is not implemented yet. Use --json.\n`);
+  // Goes to stderr so it never corrupts a JSON pipe consumer.
+  process.stderr.write(`${label} (text mode) is not implemented yet. Use --json.\n`);
+}
+
+const MAX_BODY_FILE_BYTES = Number(process.env.MAILBOX_MAX_BODY_FILE_BYTES || 10 * 1024 * 1024); // 10 MiB
+
+function _readBodyFile(bodyFilePath) {
+  const st = fs.statSync(bodyFilePath);
+  if (st.size > MAX_BODY_FILE_BYTES) {
+    throw new Error(`--body-file exceeds ${MAX_BODY_FILE_BYTES} bytes (size=${st.size})`);
+  }
+  return fs.readFileSync(bodyFilePath, "utf8");
+}
+
+// Cooperative shutdown for foreground daemons. SIGINT/SIGTERM flips the flag
+// and resolves any in-flight wait so the loop can finish its current pass
+// (e.g. mid-flush sqlite write) before exiting.
+function _createStopSignal() {
+  const state = { stopped: false, wakers: new Set() };
+  const trigger = () => {
+    state.stopped = true;
+    for (const w of state.wakers) {
+      try { w(); } catch { /* ignore */ }
+    }
+    state.wakers.clear();
+  };
+  process.once("SIGINT", trigger);
+  process.once("SIGTERM", trigger);
+  return {
+    stopped: () => state.stopped,
+    sleep(ms) {
+      if (state.stopped) return Promise.resolve();
+      return new Promise((resolve) => {
+        const t = setTimeout(() => {
+          state.wakers.delete(resolve);
+          resolve();
+        }, ms);
+        const wake = () => { clearTimeout(t); resolve(); };
+        state.wakers.add(wake);
+      });
+    },
+  };
 }
 
 function _resolveCliVersion() {
@@ -326,7 +367,7 @@ async function main(argv) {
       let body = opts.body || "";
       if (opts.bodyFile) {
         try {
-          body = require("fs").readFileSync(opts.bodyFile, "utf8");
+          body = _readBodyFile(opts.bodyFile);
         } catch (e) {
           const rc = contract.invalidUsage({ message: e && e.message ? e.message : "Failed to read body file", asJson, pretty });
           process.exit(rc);
@@ -366,7 +407,7 @@ async function main(argv) {
       let body = opts.body || "";
       if (opts.bodyFile) {
         try {
-          body = require("fs").readFileSync(opts.bodyFile, "utf8");
+          body = _readBodyFile(opts.bodyFile);
         } catch (e) {
           const rc = contract.invalidUsage({ message: e && e.message ? e.message : "Failed to read body file", asJson, pretty });
           process.exit(rc);
@@ -535,15 +576,16 @@ async function main(argv) {
     .action(async (opts) => {
       const { printJson } = require("@mailbox/shared").json;
       const intervalSec = Math.max(0.5, Number(opts.interval || 5));
+      const stop = _createStopSignal();
       try {
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
+        while (!stop.stopped()) {
           const status = sync.status();
           status.success = true;
           printJson(status, Boolean(pretty) || !asJson);
           // eslint-disable-next-line no-await-in-loop
-          await new Promise((r) => setTimeout(r, intervalSec * 1000));
+          await stop.sleep(intervalSec * 1000);
         }
+        return process.exit(0);
       } catch (e) {
         if (e && e.name === "AbortError") return process.exit(0);
         return process.exit(0);
@@ -558,14 +600,16 @@ async function main(argv) {
     .option("--full")
     .action(async (opts) => {
       const intervalSec = Math.max(5, Number(opts.interval || 300));
+      const stop = _createStopSignal();
       try {
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
+        while (!stop.stopped()) {
           // eslint-disable-next-line no-await-in-loop
           await sync.force({ account_id: opts.accountId || "", full: Boolean(opts.full) });
+          if (stop.stopped()) break;
           // eslint-disable-next-line no-await-in-loop
-          await new Promise((r) => setTimeout(r, intervalSec * 1000));
+          await stop.sleep(intervalSec * 1000);
         }
+        return process.exit(0);
       } catch {
         return process.exit(0);
       }
@@ -599,14 +643,16 @@ async function main(argv) {
     .option("--dry-run")
     .action(async (opts) => {
       const intervalSec = Math.max(5, Number(opts.interval || 3600));
+      const stop = _createStopSignal();
       try {
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
+        while (!stop.stopped()) {
           // eslint-disable-next-line no-await-in-loop
           await digest.run({ dry_run: Boolean(opts.dryRun), debug_path: "" });
+          if (stop.stopped()) break;
           // eslint-disable-next-line no-await-in-loop
-          await new Promise((r) => setTimeout(r, intervalSec * 1000));
+          await stop.sleep(intervalSec * 1000);
         }
+        return process.exit(0);
       } catch {
         return process.exit(0);
       }

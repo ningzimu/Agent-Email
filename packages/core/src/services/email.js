@@ -9,7 +9,24 @@ const { sendMail } = require("./smtp");
 const { formatDateTime, firstAddress, hasAttachmentsFromBodyStructure, formatSize } = require("./format");
 
 function _isTestMode() {
-  return String(process.env.MAILBOX_TEST_MODE || "").trim() === "1";
+  // Internal sentinel only — kept narrowly named to avoid colliding with any
+  // env a user might set. Tests must opt in explicitly.
+  return String(process.env.MAILBOX_INTERNAL_TEST_MODE || "").trim() === "1";
+}
+
+// Hard caps to defend against hostile mail. Override via env if needed.
+const MAX_MESSAGE_BYTES = Number(process.env.MAILBOX_MAX_MESSAGE_BYTES || 50 * 1024 * 1024); // 50 MiB
+const MAX_ATTACHMENT_BYTES = Number(process.env.MAILBOX_MAX_ATTACHMENT_BYTES || 25 * 1024 * 1024); // 25 MiB per file
+const MAX_ATTACHMENTS_TOTAL = Number(process.env.MAILBOX_MAX_ATTACHMENTS_BYTES || 100 * 1024 * 1024); // 100 MiB total
+
+async function _safeParse(source) {
+  if (source && Buffer.isBuffer(source) && source.length > MAX_MESSAGE_BYTES) {
+    throw new Error(`Message exceeds MAILBOX_MAX_MESSAGE_BYTES (${MAX_MESSAGE_BYTES})`);
+  }
+  const { simpleParser } = require("mailparser");
+  return simpleParser(source, {
+    maxHtmlLengthToParse: MAX_MESSAGE_BYTES,
+  });
 }
 
 function _normalizeFolder(folder) {
@@ -21,6 +38,19 @@ function _normalizeFolder(folder) {
 
 function _uidsSortedDesc(uids) {
   return [...uids].map((n) => Number(n)).filter((n) => Number.isFinite(n)).sort((a, b) => b - a);
+}
+
+// Compare email date strings as instants, not lex strings. Falls back to lex
+// only when both dates are unparseable, so we still get stable ordering.
+function _compareDatesDesc(a, b) {
+  const av = a ? Date.parse(String(a).replace(" ", "T")) : NaN;
+  const bv = b ? Date.parse(String(b).replace(" ", "T")) : NaN;
+  const aOk = Number.isFinite(av);
+  const bOk = Number.isFinite(bv);
+  if (aOk && bOk) return bv - av;
+  if (aOk) return -1;
+  if (bOk) return 1;
+  return String(b || "").localeCompare(String(a || ""));
 }
 
 function _dateOnly(raw) {
@@ -151,8 +181,10 @@ async function listEmails({
           accounts_info: [],
         };
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      // Cache failed → fall through to live IMAP. Surface the reason so users
+      // can tell why use_cache=true didn't actually use the cache.
+      process.stderr.write(`mailbox: cache read failed, falling back to live IMAP: ${e && e.message ? e.message : e}\n`);
     }
   }
 
@@ -206,7 +238,7 @@ async function listEmails({
 
   const ok = results.filter((r) => r.success);
   const allEmails = ok.flatMap((r) => r.emails || []);
-  allEmails.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  allEmails.sort((a, b) => _compareDatesDesc(a.date, b.date));
   const emails = lim > 0 ? allEmails.slice(off, off + lim) : [];
 
   const returnedByAccount = new Map();
@@ -346,7 +378,7 @@ async function searchEmails({ query, account_id = "", date_from = "", date_to = 
   }
 
   const allEmails = perAccount.flatMap((r) => (r && r.success ? r.emails || [] : []));
-  allEmails.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  allEmails.sort((a, b) => _compareDatesDesc(a.date, b.date));
 
   const page = allEmails.slice(off, off + lim);
   const total_found = perAccount.reduce((sum, r) => sum + Number((r && r.total_found) || 0), 0);
@@ -468,8 +500,7 @@ async function showEmail({
       };
     }
 
-    const { simpleParser } = require("mailparser");
-    const parsed = await simpleParser(msg.source);
+    const parsed = await _safeParse(msg.source);
     const flags = msg.flags || new Set([]);
     const unread = !flags.has("\\Seen");
 
@@ -582,21 +613,37 @@ async function markEmails({ email_ids, mark_as, folder = "INBOX", account_id = "
 
 async function _findTrashFolder(client, preferredName) {
   const pref = String(preferredName || "").trim();
-  let fallback = pref || "Trash";
   const listResult = await client.list();
   const iterate = listResult && typeof listResult[Symbol.asyncIterator] === "function"
     ? listResult
     : Array.isArray(listResult)
       ? listResult
       : [];
+
+  let exactMatch = "";
+  let bySpecialUse = "";
   for await (const mb of iterate) {
     const pathName = mb.path || mb.name || "";
+    if (!pathName) continue;
     const special = String(mb.specialUse || "");
-    if (special && special.toLowerCase().includes("trash")) return pathName;
-    if (pathName.toLowerCase() === "trash") return pathName;
-    if (pathName.toLowerCase() === "deleted items") fallback = pathName;
+    if (special === "\\Trash") {
+      bySpecialUse = pathName;
+      // \Trash is authoritative; stop searching as soon as we find it.
+      break;
+    }
+    if (pref && pathName === pref) exactMatch = pathName;
   }
-  return fallback;
+
+  if (bySpecialUse) return bySpecialUse;
+  if (exactMatch) return exactMatch;
+  // No \Trash special-use and no exact preferred-name match: fail loudly so
+  // we don't silently fall through to a non-existent "Trash" folder, which
+  // would error out per UID inside messageMove anyway.
+  throw new Error(
+    pref
+      ? `Trash folder not found: server has no \\Trash special-use mailbox and "${pref}" does not exist. Pass --trash-folder <name> or use --permanent.`
+      : "Trash folder not found: server has no \\Trash special-use mailbox. Pass --trash-folder <name> or use --permanent."
+  );
 }
 
 async function deleteEmails({ email_ids, folder = "INBOX", permanent = false, trash_folder = "Trash", account_id = "", dry_run = false } = {}) {
@@ -624,7 +671,13 @@ async function deleteEmails({ email_ids, folder = "INBOX", permanent = false, tr
     const results = [];
 
     let trashName = "";
-    if (!permanent) trashName = await _findTrashFolder(client, trash_folder);
+    if (!permanent) {
+      try {
+        trashName = await _findTrashFolder(client, trash_folder);
+      } catch (e) {
+        return { success: false, error: e && e.message ? e.message : "Trash folder lookup failed" };
+      }
+    }
 
     for (const uid of uids) {
       try {
@@ -778,19 +831,39 @@ async function forwardEmail({ email_id, to, body = "", folder = "INBOX", no_atta
 
   let attachments = [];
   if (!no_attachments && detail.attachment_count) {
-    // Best-effort: re-parse the email source to get attachment content when possible.
     if (_isTestMode()) {
       const { getMailbox } = require("../testing/mock_store");
       const mb = getMailbox(acc.account.id, _normalizeFolder(folder));
       const raw = mb && mb.messages ? mb.messages.find((m) => String(m.uid) === String(email_id)) : null;
       attachments = (raw && raw.attachments ? raw.attachments : []).map((a) => ({
-        filename: a.filename,
+        filename: path.basename(String(a.filename || "attachment")),
         content: a.content,
         contentType: a.contentType,
       }));
     } else {
-      // Fall back to forwarding without attachments.
-      attachments = [];
+      // Re-fetch the source so we can attach the original parts. Without this
+      // --no-attachments would be a no-op vs. always-drop, which is misleading.
+      const fetched = await withImapClient(acc.account, async (client) => {
+        await client.mailboxOpen(_normalizeFolder(folder));
+        const uid = Number(email_id);
+        if (!Number.isFinite(uid)) return null;
+        return client.fetchOne(uid, { source: true }, { uid: true });
+      });
+      if (fetched && fetched.source) {
+        const parsed = await _safeParse(fetched.source);
+        let totalBytes = 0;
+        for (const a of parsed.attachments || []) {
+          if (!a.content || !a.content.length) continue;
+          if (a.content.length > MAX_ATTACHMENT_BYTES) continue;
+          totalBytes += a.content.length;
+          if (totalBytes > MAX_ATTACHMENTS_TOTAL) break;
+          attachments.push({
+            filename: path.basename(String(a.filename || "attachment")),
+            content: a.content,
+            contentType: a.contentType || "application/octet-stream",
+          });
+        }
+      }
     }
   }
 
@@ -845,6 +918,22 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
   const targetDir = output_dir ? String(output_dir) : paths.getPathConfig().attachmentsDir;
   fs.mkdirSync(targetDir, { recursive: true });
 
+  // Pick a non-conflicting filename inside targetDir, basename-only to defeat
+  // path traversal from attacker-supplied filenames.
+  const _pickDest = (rawName) => {
+    const filename = path.basename(String(rawName || "attachment"));
+    if (!filename) return { filename: "", dest: "" };
+    let dest = path.join(targetDir, filename);
+    const ext = path.extname(filename);
+    const base = ext ? filename.slice(0, -ext.length) : filename;
+    let counter = 1;
+    while (fs.existsSync(dest)) {
+      dest = path.join(targetDir, `${base}_${counter}${ext}`);
+      counter += 1;
+    }
+    return { filename, dest };
+  };
+
   if (_isTestMode()) {
     const acc = accounts.getAccountByIdOrEmail(account_id);
     if (!acc.success) return acc;
@@ -852,15 +941,26 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
     const mb = getMailbox(acc.account.id, _normalizeFolder(folder));
     const raw = mb && mb.messages ? mb.messages.find((m) => String(m.uid) === String(email_id)) : null;
     const attachments = [];
+    let totalBytes = 0;
     for (const a of raw && raw.attachments ? raw.attachments : []) {
-      const p = path.join(targetDir, a.filename);
-      fs.writeFileSync(p, a.content);
+      const content = a.content;
+      if (!content || !content.length) continue;
+      if (content.length > MAX_ATTACHMENT_BYTES) {
+        return { success: false, error: `Attachment "${a.filename}" exceeds ${MAX_ATTACHMENT_BYTES} bytes` };
+      }
+      totalBytes += content.length;
+      if (totalBytes > MAX_ATTACHMENTS_TOTAL) {
+        return { success: false, error: `Attachments exceed total cap of ${MAX_ATTACHMENTS_TOTAL} bytes` };
+      }
+      const { filename, dest } = _pickDest(a.filename);
+      if (!filename) continue;
+      fs.writeFileSync(dest, content);
       attachments.push({
-        filename: a.filename,
-        size: a.content.length,
-        size_formatted: formatSize(a.content.length),
+        filename,
+        size: content.length,
+        size_formatted: formatSize(content.length),
         content_type: a.contentType,
-        saved_path: p,
+        saved_path: dest,
       });
     }
     return {
@@ -885,25 +985,22 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
     const msg = await client.fetchOne(uid, { source: true, envelope: true }, { uid: true });
     if (!msg || !msg.source) return { success: false, error: `Email not found: ${email_id}` };
 
-    const { simpleParser } = require("mailparser");
-    const parsed = await simpleParser(msg.source);
+    const parsed = await _safeParse(msg.source);
 
     const attachments = [];
+    let totalBytes = 0;
     for (const a of parsed.attachments || []) {
-      const filenameRaw = a.filename || "attachment";
-      const filename = path.basename(String(filenameRaw));
-      if (!filename) continue;
       const content = a.content;
       if (!content || !content.length) continue;
-
-      let dest = path.join(targetDir, filename);
-      const ext = path.extname(filename);
-      const base = ext ? filename.slice(0, -ext.length) : filename;
-      let counter = 1;
-      while (fs.existsSync(dest)) {
-        dest = path.join(targetDir, `${base}_${counter}${ext}`);
-        counter += 1;
+      if (content.length > MAX_ATTACHMENT_BYTES) {
+        return { success: false, error: `Attachment "${a.filename || "(unnamed)"}" exceeds ${MAX_ATTACHMENT_BYTES} bytes` };
       }
+      totalBytes += content.length;
+      if (totalBytes > MAX_ATTACHMENTS_TOTAL) {
+        return { success: false, error: `Attachments exceed total cap of ${MAX_ATTACHMENTS_TOTAL} bytes` };
+      }
+      const { filename, dest } = _pickDest(a.filename);
+      if (!filename) continue;
       fs.writeFileSync(dest, content);
 
       attachments.push({

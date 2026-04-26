@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
+  "engines": {
+    "node": ">=18.17"
+  },
   "bin": {
     "mailbox-dev": "bin/mailbox.js"
   },

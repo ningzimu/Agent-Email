@@ -21,7 +21,7 @@ export function writeAuthJson(configDir, auth) {
 export function testEnv(tmpRoot) {
   return {
     ...process.env,
-    MAILBOX_TEST_MODE: "1",
+    MAILBOX_INTERNAL_TEST_MODE: "1",
     MAILBOX_CONFIG_DIR: path.join(tmpRoot, "config"),
     MAILBOX_DATA_DIR: path.join(tmpRoot, "data"),
   };

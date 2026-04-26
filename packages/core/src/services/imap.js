@@ -1,5 +1,5 @@
 function _isTestMode() {
-  return String(process.env.MAILBOX_TEST_MODE || "").trim() === "1";
+  return String(process.env.MAILBOX_INTERNAL_TEST_MODE || "").trim() === "1";
 }
 
 function _allowInsecureTls() {
