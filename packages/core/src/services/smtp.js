@@ -2,6 +2,34 @@ function _isTestMode() {
   return String(process.env.MAILBOX_TEST_MODE || "").trim() === "1";
 }
 
+function _allowInsecureTls() {
+  return String(process.env.MAILBOX_ALLOW_INSECURE_TLS || "").trim() === "1";
+}
+
+function _buildTransportOptions(account) {
+  const port = Number(account.smtp.port);
+  const secure = Boolean(account.smtp.secure);
+  const opts = {
+    host: account.smtp.host,
+    port,
+    secure,
+    auth: {
+      user: account.email,
+      pass: account.password,
+    },
+    tls: {
+      rejectUnauthorized: !_allowInsecureTls(),
+      minVersion: "TLSv1.2",
+    },
+  };
+  // Implicit TLS (465): no STARTTLS upgrade. For everything else (587, 25, custom),
+  // require STARTTLS so a hostile MITM can't strip TLS and force plaintext auth.
+  if (!secure) {
+    opts.requireTLS = true;
+  }
+  return opts;
+}
+
 async function testConnection(account) {
   if (_isTestMode()) {
     return { success: true };
@@ -12,15 +40,7 @@ async function testConnection(account) {
   }
 
   const nodemailer = require("nodemailer");
-  const transporter = nodemailer.createTransport({
-    host: account.smtp.host,
-    port: account.smtp.port,
-    secure: Boolean(account.smtp.secure),
-    auth: {
-      user: account.email,
-      pass: account.password,
-    },
-  });
+  const transporter = nodemailer.createTransport(_buildTransportOptions(account));
 
   try {
     await transporter.verify();
@@ -39,15 +59,7 @@ async function sendMail({ account, to, cc, bcc, subject, text, html, attachments
   }
 
   const nodemailer = require("nodemailer");
-  const transporter = nodemailer.createTransport({
-    host: account.smtp.host,
-    port: account.smtp.port,
-    secure: Boolean(account.smtp.secure),
-    auth: {
-      user: account.email,
-      pass: account.password,
-    },
-  });
+  const transporter = nodemailer.createTransport(_buildTransportOptions(account));
 
   const info = await transporter.sendMail({
     from: account.email,

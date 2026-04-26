@@ -70,12 +70,10 @@ function status() {
 
 async function force({ account_id = "", full = false } = {}) {
   const pc = paths.getPathConfig();
-  // Ensure sqlite schema exists and is writable.
+  // Ensure parent dir exists. Don't pre-create a 0-byte file: sql.js treats
+  // an empty Uint8Array as a corrupt DB. The first write session creates it.
   try {
-    if (!fs.existsSync(pc.emailSyncDb)) {
-      fs.mkdirSync(require("path").dirname(pc.emailSyncDb), { recursive: true });
-      fs.writeFileSync(pc.emailSyncDb, Buffer.from([]));
-    }
+    fs.mkdirSync(require("path").dirname(pc.emailSyncDb), { recursive: true });
   } catch {
     // ignore
   }
@@ -98,23 +96,24 @@ async function force({ account_id = "", full = false } = {}) {
       // eslint-disable-next-line no-await-in-loop
       const listRes = await email.listEmails({ limit: 200, offset: 0, unread_only: false, folder: "INBOX", account_id: a.id, use_cache: false });
 
-      // Update cache DB for this account+folder.
+      // Single write session per account: one DB open, one flush, one file
+      // lock. Prevents lost updates across concurrent CLI invocations and
+      // the within-account upsertAccount → upsertFolder → upsertEmails race.
       // eslint-disable-next-line no-await-in-loop
-      await syncDb.upsertAccount({ dbPath: pc.emailSyncDb, id: a.id, email: a.email, provider: a.provider || "custom" });
-      // eslint-disable-next-line no-await-in-loop
-      const folderRes = await syncDb.upsertFolder({
-        dbPath: pc.emailSyncDb,
-        accountId: a.id,
-        name: "INBOX",
-        displayName: "INBOX",
-        messageCount: listRes.total_in_folder || 0,
-        unreadCount: listRes.unread_count || 0,
-        lastSyncIso: _nowIso(),
+      await syncDb.withWriteSession(pc.emailSyncDb, (s) => {
+        s.upsertAccount({ id: a.id, email: a.email, provider: a.provider || "custom" });
+        const folderId = s.upsertFolder({
+          accountId: a.id,
+          name: "INBOX",
+          displayName: "INBOX",
+          messageCount: listRes.total_in_folder || 0,
+          unreadCount: listRes.unread_count || 0,
+          lastSyncIso: _nowIso(),
+        });
+        if (folderId) {
+          s.upsertEmails({ accountId: a.id, folderId, emails: listRes.emails || [] });
+        }
       });
-      if (folderRes && folderRes.success) {
-        // eslint-disable-next-line no-await-in-loop
-        await syncDb.upsertEmails({ dbPath: pc.emailSyncDb, accountId: a.id, folderId: folderRes.folderId, emails: listRes.emails || [] });
-      }
 
       const per = {
         last_sync: _nowIso(),

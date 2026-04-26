@@ -15,15 +15,52 @@ function _readDbFile(dbPath) {
   try {
     if (!fs.existsSync(dbPath)) return null;
     const buf = fs.readFileSync(dbPath);
+    if (!buf || buf.length === 0) return null;
     return new Uint8Array(buf);
   } catch {
     return null;
   }
 }
 
-function _writeDbFile(dbPath, bytes) {
+function _writeDbFileAtomic(dbPath, bytes) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  fs.writeFileSync(dbPath, Buffer.from(bytes));
+  const tmp = `${dbPath}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmp, Buffer.from(bytes));
+  fs.renameSync(tmp, dbPath);
+}
+
+async function _acquireLock(dbPath, { retries = 100, delayMs = 50 } = {}) {
+  const lockPath = `${dbPath}.lock`;
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  for (let i = 0; i < retries; i += 1) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      try {
+        fs.writeSync(fd, String(process.pid));
+      } finally {
+        fs.closeSync(fd);
+      }
+      return lockPath;
+    } catch (e) {
+      if (e && e.code !== "EEXIST") throw e;
+      // Stale lock: if older than 60s, remove it.
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > 60_000) {
+          try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+          continue;
+        }
+      } catch { /* lock disappeared, retry */ }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error(`sync_db: could not acquire lock at ${lockPath}`);
+}
+
+function _releaseLock(lockPath) {
+  if (!lockPath) return;
+  try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
 }
 
 function _ensureSchema(db) {
@@ -175,6 +212,7 @@ function _execRows(db, sql, params) {
   }
 }
 
+// Open the DB without an exclusive lock — readers only. Call close() when done.
 async function openSyncDb(dbPath) {
   const SQL = await _getSQL();
   const data = _readDbFile(dbPath);
@@ -184,12 +222,101 @@ async function openSyncDb(dbPath) {
     db,
     flush() {
       const bytes = db.export();
-      _writeDbFile(dbPath, bytes);
+      _writeDbFileAtomic(dbPath, bytes);
     },
     close() {
       db.close();
     },
   };
+}
+
+// Run a write session under an exclusive file lock. Opens the DB once,
+// allows the caller to issue many writes through `session`, then flushes
+// once on success. Releases the lock on all exit paths.
+async function withWriteSession(dbPath, fn) {
+  const lockPath = await _acquireLock(dbPath);
+  let h;
+  try {
+    h = await openSyncDb(dbPath);
+    const session = {
+      db: h.db,
+      upsertAccount({ id, email, provider }) {
+        h.db.run(
+          "INSERT OR REPLACE INTO accounts (id, email, provider, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+          [String(id), String(email), String(provider)]
+        );
+      },
+      upsertFolder({ accountId, name, displayName, messageCount, unreadCount, lastSyncIso }) {
+        h.db.run(
+          `
+            INSERT INTO folders (account_id, name, display_name, message_count, unread_count, last_sync)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, name) DO UPDATE SET
+              display_name = excluded.display_name,
+              message_count = excluded.message_count,
+              unread_count = excluded.unread_count,
+              last_sync = excluded.last_sync
+          `,
+          [
+            String(accountId),
+            String(name),
+            String(displayName || name),
+            Number(messageCount || 0),
+            Number(unreadCount || 0),
+            String(lastSyncIso || new Date().toISOString()),
+          ]
+        );
+        return Number(_execScalar(
+          h.db,
+          "SELECT id FROM folders WHERE account_id = ? AND name = ?",
+          [String(accountId), String(name)]
+        ));
+      },
+      upsertEmails({ accountId, folderId, emails }) {
+        const stmt = h.db.prepare(
+          `
+            INSERT OR REPLACE INTO emails (
+              account_id, folder_id, uid, message_id, subject, sender, sender_email, recipients,
+              date_sent, is_read, is_flagged, is_deleted, has_attachments, size_bytes, sync_status, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', CURRENT_TIMESTAMP)
+          `
+        );
+        try {
+          for (const e of emails || []) {
+            const uid = String(e.uid || e.id || "").trim();
+            if (!uid) continue;
+            const isRead = e.unread ? 0 : 1;
+            stmt.run([
+              String(accountId),
+              Number(folderId),
+              uid,
+              String(e.message_id || ""),
+              String(e.subject || ""),
+              String(e.from || ""),
+              String(e.from || ""),
+              JSON.stringify({ to: e.to || "", cc: e.cc || "" }),
+              String(e.date || ""),
+              isRead,
+              0,
+              0,
+              e.has_attachments ? 1 : 0,
+              Number(e.size_bytes || e.size || 0),
+            ]);
+          }
+        } finally {
+          stmt.free();
+        }
+      },
+    };
+    const result = await fn(session);
+    h.flush();
+    return result;
+  } finally {
+    if (h) {
+      try { h.close(); } catch { /* ignore */ }
+    }
+    _releaseLock(lockPath);
+  }
 }
 
 async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limit, offset, dateFrom, dateTo }) {
@@ -219,37 +346,37 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       WHERE e.is_deleted = 0
     `;
 
-    const params = [];
+    const filterParams = [];
     if (accountId) {
       query += " AND e.account_id = ?";
-      params.push(String(accountId));
+      filterParams.push(String(accountId));
     }
     if (resolvedFolder !== "all") {
       query += " AND (f.name = ? COLLATE NOCASE OR (e.folder_id IS NULL AND ? = 'INBOX'))";
-      params.push(resolvedFolder);
-      params.push(resolvedFolder);
+      filterParams.push(resolvedFolder);
+      filterParams.push(resolvedFolder);
     }
     if (unreadOnly) {
       query += " AND e.is_read = 0";
     }
     if (dateFrom) {
       query += " AND e.date_sent >= ?";
-      params.push(String(dateFrom));
+      filterParams.push(String(dateFrom));
     }
     if (dateTo) {
       query += " AND e.date_sent <= ?";
-      params.push(String(dateTo));
+      filterParams.push(String(dateTo));
     }
 
-    // totals (same filters, no limit)
+    // Snapshot filter params before appending pagination, so the totals queries
+    // don't depend on params.slice arithmetic.
     const totalSql = `SELECT COUNT(*) FROM (${query})`;
-    const unreadSql = `SELECT COUNT(*) FROM (${query} AND is_read = 0)`;
+    const unreadSql = `SELECT COUNT(*) FROM (${query} AND e.is_read = 0)`;
 
-    query += " ORDER BY e.date_sent DESC LIMIT ? OFFSET ?";
-    params.push(Number(limit));
-    params.push(Number(offset));
+    const pagedQuery = query + " ORDER BY e.date_sent DESC LIMIT ? OFFSET ?";
+    const pagedParams = [...filterParams, Number(limit), Number(offset)];
 
-    const rows = _execRows(h.db, query, params);
+    const rows = _execRows(h.db, pagedQuery, pagedParams);
     const emails = rows.map((row) => ({
       id: String(row.id),
       uid: String(row.uid),
@@ -265,8 +392,8 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       source: "cache_sync_db",
     }));
 
-    const total_in_folder = Number(_execScalar(h.db, totalSql, params.slice(0, -2)) || emails.length);
-    const unread_count = Number(_execScalar(h.db, unreadSql, params.slice(0, -2)) || emails.filter((e) => e.unread).length);
+    const total_in_folder = Number(_execScalar(h.db, totalSql, filterParams) || emails.length);
+    const unread_count = Number(_execScalar(h.db, unreadSql, filterParams) || emails.filter((e) => e.unread).length);
 
     return {
       success: true,
@@ -277,112 +404,45 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       limit: Number(limit),
       from_cache: true,
     };
-  } catch {
+  } catch (e) {
+    if (process.env.MAILBOX_DEBUG) {
+      process.stderr.write(`sync_db cache read failed: ${e && e.message ? e.message : e}\n`);
+    }
     return null;
   } finally {
-    try {
-      h.close();
-    } catch {
-      // ignore
-    }
+    try { h.close(); } catch { /* ignore */ }
   }
 }
 
+// Standalone helpers — kept for backward compat. Each wraps a write session
+// so concurrent callers serialise on the file lock instead of clobbering.
 async function upsertAccount({ dbPath, id, email, provider }) {
-  const h = await openSyncDb(dbPath);
   try {
-    h.db.run(
-      "INSERT OR REPLACE INTO accounts (id, email, provider, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-      [String(id), String(email), String(provider)]
-    );
-    h.flush();
+    await withWriteSession(dbPath, (s) => s.upsertAccount({ id, email, provider }));
     return { success: true };
   } catch (e) {
     return { success: false, error: e && e.message ? e.message : "db error" };
-  } finally {
-    h.close();
   }
 }
 
 async function upsertFolder({ dbPath, accountId, name, displayName, messageCount, unreadCount, lastSyncIso }) {
-  const h = await openSyncDb(dbPath);
   try {
-    // Keep the Python semantics: do NOT use REPLACE because it breaks folder_id.
-    h.db.run(
-      `
-        INSERT INTO folders (account_id, name, display_name, message_count, unread_count, last_sync)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(account_id, name) DO UPDATE SET
-          display_name = excluded.display_name,
-          message_count = excluded.message_count,
-          unread_count = excluded.unread_count,
-          last_sync = excluded.last_sync
-      `,
-      [
-        String(accountId),
-        String(name),
-        String(displayName || name),
-        Number(messageCount || 0),
-        Number(unreadCount || 0),
-        String(lastSyncIso || new Date().toISOString()),
-      ]
-    );
-    const folderId = _execScalar(
-      h.db,
-      "SELECT id FROM folders WHERE account_id = ? AND name = ?",
-      [String(accountId), String(name)]
-    );
-    h.flush();
-    return { success: true, folderId: Number(folderId) };
+    let folderId = 0;
+    await withWriteSession(dbPath, (s) => {
+      folderId = s.upsertFolder({ accountId, name, displayName, messageCount, unreadCount, lastSyncIso });
+    });
+    return { success: true, folderId };
   } catch (e) {
     return { success: false, error: e && e.message ? e.message : "db error" };
-  } finally {
-    h.close();
   }
 }
 
 async function upsertEmails({ dbPath, accountId, folderId, emails }) {
-  const h = await openSyncDb(dbPath);
   try {
-    const stmt = h.db.prepare(
-      `
-        INSERT OR REPLACE INTO emails (
-          account_id, folder_id, uid, message_id, subject, sender, sender_email, recipients,
-          date_sent, is_read, is_flagged, is_deleted, has_attachments, size_bytes, sync_status, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', CURRENT_TIMESTAMP)
-      `
-    );
-    try {
-      for (const e of emails || []) {
-        const uid = String(e.uid || e.id || "").trim();
-        if (!uid) continue;
-        const isRead = e.unread ? 0 : 1;
-        stmt.run([
-          String(accountId),
-          Number(folderId),
-          uid,
-          String(e.message_id || ""),
-          String(e.subject || ""),
-          String(e.from || ""),
-          String(e.from || ""),
-          JSON.stringify({ to: e.to || "", cc: e.cc || "" }),
-          String(e.date || ""),
-          isRead,
-          0,
-          0,
-          e.has_attachments ? 1 : 0,
-          Number(e.size_bytes || e.size || 0),
-        ]);
-      }
-    } finally {
-      stmt.free();
-    }
-    h.flush();
+    await withWriteSession(dbPath, (s) => s.upsertEmails({ accountId, folderId, emails }));
     return { success: true };
   } catch (e) {
     return { success: false, error: e && e.message ? e.message : "db error" };
-  } finally {
-    h.close();
   }
 }
 
@@ -391,4 +451,5 @@ module.exports = {
   upsertAccount,
   upsertFolder,
   upsertEmails,
+  withWriteSession,
 };

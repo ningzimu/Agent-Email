@@ -2,6 +2,10 @@ function _isTestMode() {
   return String(process.env.MAILBOX_TEST_MODE || "").trim() === "1";
 }
 
+function _allowInsecureTls() {
+  return String(process.env.MAILBOX_ALLOW_INSECURE_TLS || "").trim() === "1";
+}
+
 async function withImapClient(account, fn) {
   if (_isTestMode()) {
     const { createMockImapClient } = require("../testing/mock_imap_client");
@@ -10,14 +14,23 @@ async function withImapClient(account, fn) {
   }
 
   const { ImapFlow } = require("imapflow");
+  const port = Number(account.imap.port);
+  const secure = Boolean(account.imap.secure);
+  const tls = {
+    rejectUnauthorized: !_allowInsecureTls(),
+    minVersion: "TLSv1.2",
+  };
+  // Implicit TLS (993): connect over TLS. Otherwise require STARTTLS to refuse plaintext.
   const client = new ImapFlow({
     host: account.imap.host,
-    port: account.imap.port,
-    secure: Boolean(account.imap.secure),
+    port,
+    secure,
+    requireTLS: !secure,
     auth: {
       user: account.email,
       pass: account.password,
     },
+    tls,
     logger: false,
   });
 

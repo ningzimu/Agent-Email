@@ -455,6 +455,8 @@ async function showEmail({
         attachment_count: attachments.length,
         unread,
         message_id: raw.messageId || "",
+        in_reply_to: raw.inReplyTo || "",
+        references: raw.references || "",
         folder: openFolder,
         account: acc.account.email,
         account_id: acc.account.id,
@@ -515,6 +517,10 @@ async function showEmail({
       attachment_count: attachments.length,
       unread,
       message_id: parsed.messageId || (msg.envelope ? msg.envelope.messageId : ""),
+      in_reply_to: parsed.inReplyTo || "",
+      references: Array.isArray(parsed.references)
+        ? parsed.references.join(" ")
+        : (parsed.references || ""),
       folder: openFolder,
       account: acc.account.email,
       account_id: acc.account.id,
@@ -674,30 +680,86 @@ async function sendEmail({ to, subject, body, cc, bcc, account_id = "", is_html 
   }
 }
 
+// Common reply-prefix forms across locales. Matches "Re:", "RE：", "回复:",
+// "答复:", "Sv:", "Antwort:", "AW:", "RES:", "Tr:" with optional whitespace.
+const _REPLY_PREFIX_RE = /^\s*(re|aw|antwort|sv|res|回复|答复|回覆|tr)\s*[:：]/i;
+
+function _splitAddressList(value) {
+  if (!value) return [];
+  return String(value)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function _addressEmail(addr) {
+  const m = String(addr).match(/<([^>]+)>/);
+  return (m ? m[1] : String(addr)).trim().toLowerCase();
+}
+
+function _dedupeAddresses(list, exclude) {
+  const excluded = new Set((exclude || []).map((x) => String(x).toLowerCase()));
+  const seen = new Set();
+  const out = [];
+  for (const addr of list) {
+    const key = _addressEmail(addr);
+    if (!key || excluded.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(addr);
+  }
+  return out;
+}
+
+function _buildReferences(detail) {
+  const refs = [];
+  const existing = detail.references ? String(detail.references).trim() : "";
+  if (existing) refs.push(existing);
+  const parent = detail.message_id ? String(detail.message_id).trim() : "";
+  if (parent && !refs.join(" ").includes(parent)) refs.push(parent);
+  return refs.join(" ").trim();
+}
+
 async function replyEmail({ email_id, body, reply_all = false, folder = "INBOX", account_id = "", is_html = false } = {}) {
   const detail = await showEmail({ email_id, folder, account_id });
   if (!detail.success) return detail;
   const acc = accounts.getAccountByIdOrEmail(account_id);
   if (!acc.success) return acc;
 
-  const to = reply_all ? detail.to : detail.from;
-  const subject = detail.subject && detail.subject.toLowerCase().startsWith("re:") ? detail.subject : `Re: ${detail.subject || ""}`;
+  const fromAddr = detail.from || "";
+  let toList = [fromAddr].filter(Boolean);
+  let ccList = [];
+  if (reply_all) {
+    const origTo = _splitAddressList(detail.to);
+    const origCc = _splitAddressList(detail.cc);
+    toList = _dedupeAddresses([fromAddr, ...origTo], [acc.account.email]);
+    ccList = _dedupeAddresses(origCc, [acc.account.email, ..._dedupeAddresses(toList).map(_addressEmail)]);
+  }
+  if (!toList.length) {
+    return { success: false, error: "Reply has no recipient (original sender unknown)", from: acc.account.email };
+  }
+
+  const subjectRaw = detail.subject || "";
+  const subject = _REPLY_PREFIX_RE.test(subjectRaw) ? subjectRaw : `Re: ${subjectRaw}`;
+  const headers = {};
+  if (detail.message_id) headers["In-Reply-To"] = detail.message_id;
+  const refs = _buildReferences(detail);
+  if (refs) headers.References = refs;
+
   try {
     await sendMail({
       account: acc.account,
-      to,
+      to: toList.join(", "),
+      cc: ccList.length ? ccList.join(", ") : undefined,
       subject,
       text: is_html ? "" : String(body || ""),
       html: is_html ? String(body || "") : "",
-      headers: {
-        "In-Reply-To": detail.message_id || "",
-        References: detail.message_id || "",
-      },
+      headers,
     });
     return {
       success: true,
       message: "Reply sent successfully",
-      recipients: [to],
+      recipients: toList,
+      cc: ccList,
       from: acc.account.email,
     };
   } catch (e) {
@@ -864,6 +926,23 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
   });
 }
 
+// Map user-facing flag_type to IMAP keyword. Unknown values fall through as
+// custom keywords (which any IMAP server may accept or reject) so we don't
+// silently coerce them into \Flagged.
+const _FLAG_MAP = {
+  flagged: "\\Flagged",
+  starred: "\\Flagged",
+  important: "$Important",
+  read: "\\Seen",
+  seen: "\\Seen",
+  answered: "\\Answered",
+  draft: "\\Draft",
+  junk: "$Junk",
+  spam: "$Junk",
+  notjunk: "$NotJunk",
+  forwarded: "$Forwarded",
+};
+
 async function flagEmail({ email_id, set_flag, flag_type = "flagged", folder = "INBOX", account_id } = {}) {
   const acc = accounts.getAccountByIdOrEmail(account_id);
   if (!acc.success) return acc;
@@ -872,7 +951,7 @@ async function flagEmail({ email_id, set_flag, flag_type = "flagged", folder = "
   if (!Number.isFinite(uid)) return { success: false, error: "Invalid email_id" };
 
   const flagType = String(flag_type || "flagged").toLowerCase();
-  const flag = flagType === "flagged" ? "\\Flagged" : "\\Flagged";
+  const flag = _FLAG_MAP[flagType] || flagType;
   const set = Boolean(set_flag);
 
   return withImapClient(acc.account, async (client) => {
