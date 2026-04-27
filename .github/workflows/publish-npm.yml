@@ -82,14 +82,24 @@ jobs:
       - name: Install
         run: pnpm install
 
-      - name: Force OIDC (ignore legacy tokens)
+      - name: Configure npm auth (NPM_TOKEN if set, else OIDC)
         shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          unset NODE_AUTH_TOKEN || true
-          unset NPM_TOKEN || true
           export NPM_CONFIG_USERCONFIG="$PWD/.npmrc"
-          printf "registry=https://registry.npmjs.org/\n" > "$NPM_CONFIG_USERCONFIG"
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            printf "registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n" "$NPM_TOKEN" > "$NPM_CONFIG_USERCONFIG"
+            echo "auth=NPM_TOKEN"
+          else
+            # Fall back to OIDC trusted publishing. Requires the package
+            # owner to have configured this repo+workflow as a trusted
+            # publisher on npmjs.com → Settings → Trusted publishers.
+            unset NODE_AUTH_TOKEN || true
+            printf "registry=https://registry.npmjs.org/\n" > "$NPM_CONFIG_USERCONFIG"
+            echo "auth=OIDC"
+          fi
           npm config list
 
       - name: Download binaries
@@ -125,9 +135,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish --access public "mailbox-cli/packages/mailbox-cli-darwin-arm64"
-          env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish --access public "mailbox-cli/packages/mailbox-cli-darwin-x64"
-          env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish --access public "mailbox-cli/packages/mailbox-cli-linux-x64-gnu"
+          # Use the .npmrc written by the auth step. We unset NODE_AUTH_TOKEN
+          # so setup-node's default doesn't override our config; NPM_TOKEN
+          # (when set) was already baked into .npmrc.
+          publish_one() {
+            local dir="$1"
+            env -u NODE_AUTH_TOKEN npm publish --access public "$dir" || {
+              # If the version already exists, treat as idempotent success
+              # (allows re-running publish-npm after a partial failure).
+              local rc=$?
+              if env -u NODE_AUTH_TOKEN npm view "$(node -p "require('./$dir/package.json').name")@$(node -p "require('./$dir/package.json').version")" version >/dev/null 2>&1; then
+                echo "already published, skipping"
+                return 0
+              fi
+              return $rc
+            }
+          }
+          publish_one mailbox-cli/packages/mailbox-cli-darwin-arm64
+          publish_one mailbox-cli/packages/mailbox-cli-darwin-x64
+          publish_one mailbox-cli/packages/mailbox-cli-linux-x64-gnu
 
       - name: Publish launcher package
-        run: env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish --access public mailbox-cli/packages/mailbox-cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u NODE_AUTH_TOKEN npm publish --access public mailbox-cli/packages/mailbox-cli || {
+            rc=$?
+            if env -u NODE_AUTH_TOKEN npm view "@leeguoo/mailbox-cli@$(node -p "require('./mailbox-cli/packages/mailbox-cli/package.json').version")" version >/dev/null 2>&1; then
+              echo "launcher already published, skipping"; exit 0
+            fi
+            exit $rc
+          }
