@@ -83,9 +83,17 @@ async function startDaemon({ foreground = true, log = console.error, syncInterva
   // IMAP connections as RPC traffic — no extra TCP handshakes for the
   // periodic refresh. AI clients hitting `email list` (without --live)
   // then read from the local SQLite cache instead of doing IMAP at all.
-  let syncTimer = null;
+  // Background sync loop. Uses an awaiting setTimeout chain rather than
+  // setInterval so a slow IMAP+SQLite pass can't trigger overlapping
+  // sync.force() calls (which would race on the cache db and on the
+  // pooled IMAP connection).
+  let syncRunning = false;
+  let syncStopped = false;
   if (syncIntervalMs > 0) {
     const runSync = async () => {
+      if (syncStopped) return;
+      if (syncRunning) return; // belt-and-suspenders; loop already serializes
+      syncRunning = true;
       stats.syncs_attempted += 1;
       try {
         const r = await core.sync.force({ account_id: syncAccountId || "", full: false });
@@ -96,18 +104,25 @@ async function startDaemon({ foreground = true, log = console.error, syncInterva
       } catch (e) {
         stats.syncs_failed += 1;
         stats.last_sync_error = (e && e.message) || String(e);
+      } finally {
+        syncRunning = false;
       }
     };
-    // First sync after a short delay so we don't block startup.
-    setTimeout(() => { runSync(); }, 5_000);
-    syncTimer = setInterval(runSync, syncIntervalMs);
-    if (typeof syncTimer.unref === "function") syncTimer.unref();
+    const scheduleNext = (delay) => {
+      if (syncStopped) return;
+      const t = setTimeout(async () => {
+        await runSync();
+        scheduleNext(syncIntervalMs);
+      }, delay);
+      if (typeof t.unref === "function") t.unref();
+    };
+    scheduleNext(5_000); // first run after warm-up
     log(`[mailbox daemon] background sync every ${Math.round(syncIntervalMs / 1000)}s${syncAccountId ? ` (account ${syncAccountId})` : ""}`);
   }
 
   const cleanup = async () => {
     log(`[mailbox daemon] shutting down (pid=${process.pid})`);
-    if (syncTimer) clearInterval(syncTimer);
+    syncStopped = true;
     try { await pool.closeAll(); } catch { /* ignore */ }
     try { server.close(); } catch { /* ignore */ }
     try { fs.unlinkSync(sockPath); } catch { /* ignore */ }
@@ -121,11 +136,24 @@ async function startDaemon({ foreground = true, log = console.error, syncInterva
   return { server, pool, sockPath, stats };
 }
 
+// Hard cap on a single JSON-RPC line so a misbehaving (or hostile) local
+// client can't grow our recv buffer until OOM. 1 MiB is plenty for any
+// legitimate request — even sending an email body via RPC fits.
+const MAX_LINE_BYTES = Number(process.env.MAILBOX_DAEMON_MAX_LINE_BYTES || 1 * 1024 * 1024);
+
 function _handleConn(conn, ctx) {
   let buffer = "";
   conn.setEncoding("utf8");
   conn.on("data", (chunk) => {
     buffer += chunk;
+    if (buffer.length > MAX_LINE_BYTES) {
+      try {
+        conn.write(JSON.stringify({ id: null, ok: false, error: `request exceeds MAILBOX_DAEMON_MAX_LINE_BYTES=${MAX_LINE_BYTES}`, error_code: "size_limit" }) + "\n");
+      } catch { /* ignore */ }
+      try { conn.destroy(); } catch { /* ignore */ }
+      buffer = "";
+      return;
+    }
     let idx;
     while ((idx = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, idx);
@@ -323,7 +351,7 @@ async function installAutostart({ syncIntervalSec = 300 } = {}) {
     } catch (e) {
       activate = `wrote plist; load it manually: launchctl load -w ${info.unitPath}`;
     }
-    return { success: true, unit_path: info.unitPath, log_path: info.logPath, exe: `${node} ${script}`, sync_interval_sec: syncIntervalSec, activate_hint: activate };
+    return { success: true, unit_path: info.unitPath, log_path: info.logPath, exe: (node ? `${node} ${script}` : script), sync_interval_sec: syncIntervalSec, activate_hint: activate };
   }
 
   if (info.kind === "systemd") {
@@ -336,7 +364,7 @@ async function installAutostart({ syncIntervalSec = 300 } = {}) {
       execFileSync("systemctl", ["--user", "enable", "--now", SYSTEMD_UNIT], { stdio: "ignore" });
       activate = `systemd unit enabled and started`;
     } catch { /* leave activate as the manual instruction */ }
-    return { success: true, unit_path: info.unitPath, exe: `${node} ${script}`, sync_interval_sec: syncIntervalSec, activate_hint: activate };
+    return { success: true, unit_path: info.unitPath, exe: (node ? `${node} ${script}` : script), sync_interval_sec: syncIntervalSec, activate_hint: activate };
   }
 
   return { success: false, error: "unknown autostart kind", error_code: "operation_failed" };

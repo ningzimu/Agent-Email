@@ -471,6 +471,12 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
       const fetchCap = usedClientFilter ? Math.min(clientCap, sorted.length) : Math.min(perAccountFetchLimit, sorted.length);
       const slice = sorted.slice(0, fetchCap);
 
+      // NOTE: in client-filter mode we only have envelope data (no
+      // message body), so `query` matches against subject + from only.
+      // Pure body-text matches will be missed on broken-search providers
+      // (163/QQ/126/sina/aliyun/outlook). Use `from`/`subject` filters
+      // for predictable results, or rely on Gmail's X-GM-RAW path which
+      // does search bodies server-side.
       const qLower = q.toLowerCase();
       const fromLower = fromQ.toLowerCase();
       const subjLower = subjQ.toLowerCase();
@@ -1476,43 +1482,73 @@ async function watchFolder({ account_id, folder = "INBOX", filter = {}, onEvent 
   await client.mailboxOpen(openFolder);
   let lastUid = client.mailbox && client.mailbox.uidNext ? Number(client.mailbox.uidNext) : 0;
 
+  // Serialize concurrent `exists` events: if a fetch is already running,
+  // remember that we need another pass. Without this, two events that
+  // arrive close together can fetch the same range twice and emit
+  // duplicate `new_email` callbacks.
+  let fetchInFlight = false;
+  let fetchPending = false;
+  const seenUids = new Set();
+
   const fetchSince = async () => {
-    if (!lastUid) return;
+    if (fetchInFlight) { fetchPending = true; return; }
+    fetchInFlight = true;
     try {
-      const since = `${lastUid}:*`;
-      for await (const msg of client.fetch(
-        since,
-        { envelope: true, flags: true, internalDate: true, bodyStructure: true },
-        { uid: true }
-      )) {
-        const env = msg.envelope || {};
-        if (!matches(env)) continue;
-        const flags = msg.flags || new Set([]);
-        if (Number(msg.uid) < lastUid) continue; // duplicate from `:*` semantics
-        const item = {
-          id: String(msg.uid),
-          uid: String(msg.uid),
-          gid: `${acc.account.id}:${msg.uid}`,
-          message_id: env.messageId || "",
-          subject: env.subject || "",
-          from: firstAddress(env.from),
-          date: formatDateTime(msg.internalDate || env.date),
-          unread: !flags.has("\\Seen"),
-          has_attachments: hasAttachmentsFromBodyStructure(msg.bodyStructure),
-          account: acc.account.email,
-          account_id: acc.account.id,
-          folder: openFolder,
-          source: "imap_idle",
-        };
-        if (typeof onEvent === "function") {
-          try { onEvent({ type: "new_email", email: item }); } catch { /* ignore */ }
+      do {
+        fetchPending = false;
+        if (!lastUid) break;
+        try {
+          const since = `${lastUid}:*`;
+          // eslint-disable-next-line no-await-in-loop
+          for await (const msg of client.fetch(
+            since,
+            { envelope: true, flags: true, internalDate: true, bodyStructure: true },
+            { uid: true }
+          )) {
+            const uidNum = Number(msg.uid);
+            if (!Number.isFinite(uidNum)) continue;
+            if (uidNum < lastUid) continue;          // `:*` lower-bound is inclusive
+            if (seenUids.has(uidNum)) continue;      // already emitted across passes
+            const env = msg.envelope || {};
+            // Always advance lastUid even when filter rejects the message,
+            // so later fetches don't re-scan it.
+            lastUid = Math.max(lastUid, uidNum + 1);
+            seenUids.add(uidNum);
+            // Cap the dedup set so a long-running watcher doesn't grow
+            // memory unbounded.
+            if (seenUids.size > 4096) {
+              const oldest = [...seenUids].slice(0, seenUids.size - 2048);
+              for (const u of oldest) seenUids.delete(u);
+            }
+            if (!matches(env)) continue;
+            const flags = msg.flags || new Set([]);
+            const item = {
+              id: String(uidNum),
+              uid: String(uidNum),
+              gid: `${acc.account.id}:${uidNum}`,
+              message_id: env.messageId || "",
+              subject: env.subject || "",
+              from: firstAddress(env.from),
+              date: formatDateTime(msg.internalDate || env.date),
+              unread: !flags.has("\\Seen"),
+              has_attachments: hasAttachmentsFromBodyStructure(msg.bodyStructure),
+              account: acc.account.email,
+              account_id: acc.account.id,
+              folder: openFolder,
+              source: "imap_idle",
+            };
+            if (typeof onEvent === "function") {
+              try { onEvent({ type: "new_email", email: item }); } catch { /* ignore */ }
+            }
+          }
+        } catch (e) {
+          if (typeof onEvent === "function") {
+            try { onEvent({ type: "fetch_error", error: e && e.message ? e.message : String(e) }); } catch { /* ignore */ }
+          }
         }
-        lastUid = Number(msg.uid) + 1;
-      }
-    } catch (e) {
-      if (typeof onEvent === "function") {
-        try { onEvent({ type: "fetch_error", error: e && e.message ? e.message : String(e) }); } catch { /* ignore */ }
-      }
+      } while (fetchPending && !stopped);
+    } finally {
+      fetchInFlight = false;
     }
   };
 

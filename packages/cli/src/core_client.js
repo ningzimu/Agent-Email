@@ -13,9 +13,15 @@ const realWorkflows = (() => {
 const { getSocketPath } = require("./daemon");
 
 const CONNECT_TIMEOUT_MS = Number(process.env.MAILBOX_DAEMON_CONNECT_TIMEOUT_MS || 200);
+const CALL_TIMEOUT_MS = Number(process.env.MAILBOX_DAEMON_CALL_TIMEOUT_MS || 60000);
+// How long after a probe miss before we'll re-probe the daemon socket.
+// Long-running MCP servers benefit from re-probing because the daemon
+// may have been started after MCP came up. Short-lived CLI calls don't
+// see this — they exit before the cooldown matters.
+const REPROBE_AFTER_MS = Number(process.env.MAILBOX_DAEMON_REPROBE_MS || 5000);
 
-let _attempted = false;
 let _client = null;
+let _lastProbeAt = 0;
 
 class DaemonClient {
   constructor(conn) {
@@ -51,10 +57,23 @@ class DaemonClient {
   call(fn, args) {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
+      // Per-call timeout so a malformed/missing daemon response doesn't
+      // hang the CLI or MCP server forever.
+      const timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        reject(Object.assign(new Error(`daemon call ${fn} timed out after ${CALL_TIMEOUT_MS}ms`), { code: "daemon_timeout" }));
+      }, CALL_TIMEOUT_MS);
+      if (typeof timer.unref === "function") timer.unref();
+      const wrap = {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      };
+      this.pending.set(id, wrap);
       try {
         this.conn.write(JSON.stringify({ id, fn, args: args || {} }) + "\n");
       } catch (e) {
+        clearTimeout(timer);
         this.pending.delete(id);
         reject(e);
       }
@@ -66,11 +85,21 @@ class DaemonClient {
 }
 
 async function _maybeConnect() {
-  if (_attempted) return _client;
-  _attempted = true;
   // Daemon disabled by env knob (useful when an agent has no daemon and
   // wants to skip the probe latency).
   if (String(process.env.MAILBOX_NO_DAEMON || "").trim() === "1") return null;
+
+  // Reuse a live client.
+  if (_client && _client.conn && !_client.conn.destroyed) return _client;
+  _client = null;
+
+  // Cooldown: don't re-probe more than once every REPROBE_AFTER_MS after a
+  // miss. Lets short-lived CLI calls fall through fast, lets long-running
+  // MCP servers eventually pick up a daemon that started later.
+  const now = Date.now();
+  if (now - _lastProbeAt < REPROBE_AFTER_MS) return null;
+  _lastProbeAt = now;
+
   const sockPath = getSocketPath();
   if (!fs.existsSync(sockPath)) return null;
   return new Promise((resolve) => {
@@ -89,12 +118,18 @@ async function _maybeConnect() {
       resolve(val);
     };
     conn.once("connect", () => {
-      _client = new DaemonClient(conn);
-      // Note: do NOT unref the socket here. Every action handler ends with
-      // process.exit(rc), so the socket lifetime is fine — but unref'ing
-      // would let Node exit before the daemon response arrives, killing
-      // the in-flight call.
-      settle(_client);
+      const c = new DaemonClient(conn);
+      // Drop the cached client when its socket dies so the next call
+      // re-probes instead of trying to write to a dead pipe.
+      conn.on("close", () => { if (_client === c) _client = null; });
+      conn.on("error", () => { if (_client === c) _client = null; });
+      _client = c;
+      // Note: do NOT unref the socket here. Every CLI action handler
+      // ends with process.exit(rc); unref'ing would let Node exit
+      // before the daemon response arrives, killing the in-flight call.
+      // For long-running consumers (MCP serve), the conn is already
+      // ref'd because of pending writes/reads.
+      settle(c);
     });
     conn.once("error", () => settle(null));
   });

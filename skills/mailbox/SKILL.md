@@ -64,6 +64,13 @@ mailbox email list --account-id <id> --limit 20 --with-preview 200 --json   # +b
 mailbox email search --from amazon --subject review --folder all --json
 mailbox email search --query "interview"  --date-from 2w --json    # relative dates: 2d/3w/1mo/today/yesterday
 
+# NOTE: on QQ/163/126/sina/aliyun/outlook, IMAP TEXT search is broken,
+# so the CLI falls back to envelope-only client-side filtering. That
+# means `--query` only matches against `subject + from` for those
+# providers — pure body-text matches will be missed. Use `--from` /
+# `--subject` for predictable results, or use a Gmail account where
+# X-GM-RAW does search the body server-side.
+
 # Read one or many emails (AI-friendly defaults: text only, capped at 2000 chars, URLs stripped):
 mailbox email show <gid> --json                    # gid = "<account_id>:<uid>" — no --account-id needed
 mailbox email show <gid1> <gid2> <gid3> --json     # batch — one IMAP connection

@@ -36,11 +36,14 @@ class AccountPool {
     this.maxSize = maxSize;
     // Each entry: { client, inUse, keepalive, lastUsed }
     this.entries = [];
-    // Resolver queue for callers waiting for a free client.
+    // Pending callers: { resolve, reject } — fail-loud if pool is closed
+    // or a rebuild fails so the CLI doesn't hang forever.
     this.waiters = [];
+    this.closed = false;
   }
 
   async acquire() {
+    if (this.closed) throw new Error(`pool for ${this.account.email} is closed`);
     // 1. Reuse a free, usable client.
     for (const e of this.entries) {
       if (!e.inUse && e.client && e.client.usable) {
@@ -60,24 +63,23 @@ class AccountPool {
       return e;
     }
     // 4. Wait for someone to release.
-    return new Promise((resolve) => this.waiters.push(resolve));
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
 
   release(entry) {
     entry.inUse = false;
     const next = this.waiters.shift();
-    if (next) {
-      // If the client died while waiters were queued, build/find a fresh one
-      // before handing off.
-      if (entry.client && entry.client.usable) {
-        entry.inUse = true;
-        entry.lastUsed = Date.now();
-        next(entry);
-      } else {
-        // Trigger acquire() for the waiter; they'll get a fresh entry.
-        this.acquire().then(next);
-      }
+    if (!next) return;
+    // If the just-released client is still alive, hand it off directly.
+    if (entry.client && entry.client.usable) {
+      entry.inUse = true;
+      entry.lastUsed = Date.now();
+      next.resolve(entry);
+      return;
     }
+    // Otherwise the waiter needs a fresh client. Forward the rebuild's
+    // outcome — including failures — so they don't hang silently.
+    this.acquire().then(next.resolve, next.reject);
   }
 
   async _build() {
@@ -88,6 +90,15 @@ class AccountPool {
     });
     try {
       await Promise.race([client.connect(), timeout]);
+    } catch (err) {
+      // The race may have rejected because of the timeout while the
+      // underlying TCP socket is still trying to connect — close it so
+      // we don't leak a half-open ImapFlow client + its keepalive timers.
+      try {
+        if (typeof client.close === "function") client.close();
+        else if (typeof client.logout === "function") await client.logout();
+      } catch { /* ignore */ }
+      throw err;
     } finally {
       clearTimeout(timeoutId);
     }
@@ -107,6 +118,7 @@ class AccountPool {
   }
 
   async closeAll() {
+    this.closed = true;
     for (const e of this.entries) {
       clearInterval(e.keepalive);
       if (e.client) {
@@ -114,10 +126,10 @@ class AccountPool {
       }
     }
     this.entries = [];
-    // Reject any pending waiters so they don't hang forever.
+    // Reject any pending waiters with a clear error so they don't hang.
     while (this.waiters.length) {
       const w = this.waiters.shift();
-      try { w({ client: null, inUse: false }); } catch { /* ignore */ }
+      try { w.reject(new Error(`pool for ${this.account.email} is closed`)); } catch { /* ignore */ }
     }
   }
 
