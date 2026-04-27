@@ -73,4 +73,64 @@ describe("Codex review fixes (regression)", () => {
     // Plain "Invalid X" still maps to the generic argument code:
     expect(inferErrorCode("Invalid email_id")).toBe("invalid_argument");
   });
+
+  it("email mark splits a single whitespace/comma-separated ids argument", async () => {
+    const root = tmpRoot("mark_split_ids");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "mark", "101 102,103", "--read", "--account-id", "mock_acc", "--dry-run", "--json"],
+      { reject: false, env }
+    );
+
+    expect(r.exitCode).toBe(0);
+    const payload = JSON.parse(r.stdout);
+    expect(payload).toHaveProperty("success", true);
+    expect(payload.would_mark).toBe(3);
+    expect(payload.email_ids).toEqual(["101", "102", "103"]);
+  });
+
+  it("email delete splits a single whitespace/comma-separated ids argument", async () => {
+    const root = tmpRoot("delete_split_ids");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "delete", "101 102,103", "--account-id", "mock_acc", "--dry-run", "--json"],
+      { reject: false, env }
+    );
+
+    expect(r.exitCode).toBe(0);
+    const payload = JSON.parse(r.stdout);
+    expect(payload).toHaveProperty("success", true);
+    expect(payload.would_delete).toBe(3);
+    expect(payload.email_ids).toEqual(["101", "102", "103"]);
+  });
+
+  it("batch email show includes list_unsubscribe", async () => {
+    const root = tmpRoot("batch_show_list_unsubscribe");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "show", "101", "102", "--account-id", "mock_acc", "--folder", "INBOX", "--json"],
+      { reject: false, env }
+    );
+
+    expect(r.exitCode).toBe(0);
+    const payload = JSON.parse(r.stdout);
+    expect(payload).toHaveProperty("success", true);
+    expect(payload.emails[0]).toHaveProperty("list_unsubscribe");
+    expect(payload.emails[0].list_unsubscribe).toEqual({
+      mailto: "mailto:unsubscribe@example.com",
+      http: "https://example.com/unsubscribe",
+    });
+  });
 });

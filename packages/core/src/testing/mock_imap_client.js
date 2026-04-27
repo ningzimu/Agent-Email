@@ -1,6 +1,14 @@
 const { getMailbox, listMailboxNames } = require("./mock_store");
 
 function _cloneMessage(m) {
+  const headers = [
+    `Message-ID: ${m.messageId}`,
+    `From: ${m.from}`,
+    `To: ${m.to}`,
+    `Subject: ${m.subject}`,
+    `Date: ${m.date}`,
+  ];
+  if (m.listUnsubscribe) headers.push(`List-Unsubscribe: ${m.listUnsubscribe}`);
   return {
     uid: m.uid,
     envelope: {
@@ -15,11 +23,7 @@ function _cloneMessage(m) {
     internalDate: new Date(m.date.replace(" ", "T") + "Z"),
     source: Buffer.from(
       [
-        `Message-ID: ${m.messageId}`,
-        `From: ${m.from}`,
-        `To: ${m.to}`,
-        `Subject: ${m.subject}`,
-        `Date: ${m.date}`,
+        ...headers,
         "",
         m.body || "",
       ].join("\n")

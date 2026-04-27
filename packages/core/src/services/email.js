@@ -7,6 +7,7 @@ const accounts = require("./accounts");
 const { withImapClient } = require("./imap");
 const { sendMail } = require("./smtp");
 const { formatDateTime, firstAddress, hasAttachmentsFromBodyStructure, formatSize } = require("./format");
+const syncDb = require("../storage/sync_db");
 
 function _isTestMode() {
   // Internal sentinel only — kept narrowly named to avoid colliding with any
@@ -638,6 +639,48 @@ function _stripUrls(text) {
   return String(text || "").replace(/https?:\/\/\S+/gi, "[link]");
 }
 
+function _parseListUnsubscribeHeader(value) {
+  if (!value) return null;
+  const str = Array.isArray(value) ? value.join(", ") : String(value);
+  const mailto = (str.match(/<(mailto:[^>]+)>/i) || str.match(/\b(mailto:[^\s,>]+)/i) || [])[1] || null;
+  const http = (str.match(/<(https?:[^>]+)>/i) || str.match(/\b(https?:[^\s,>]+)/i) || [])[1] || null;
+  if (!mailto && !http) return null;
+  return { mailto, http };
+}
+
+function _formatListUnsubscribeFromListHeader(unsubscribe) {
+  if (!unsubscribe) return null;
+  const mail = unsubscribe.mail || "";
+  const url = unsubscribe.url || "";
+  return {
+    mailto: mail ? (String(mail).toLowerCase().startsWith("mailto:") ? mail : `mailto:${mail}`) : null,
+    http: url || null,
+  };
+}
+
+// Extract List-Unsubscribe header values from a mailparser-parsed email.
+// mailparser may fold List-Unsubscribe into parsed.headers.get('list').unsubscribe
+// or preserve a direct parsed.headers.get('list-unsubscribe') value.
+function _extractListUnsubscribe(parsed) {
+  if (!parsed || !parsed.headers) return null;
+  const list = parsed.headers.get("list");
+  const fromList = _formatListUnsubscribeFromListHeader(list && list.unsubscribe);
+  if (fromList) return fromList;
+
+  const direct = _parseListUnsubscribeHeader(parsed.headers.get("list-unsubscribe"));
+  if (direct) return direct;
+
+  // Fallback: scan raw headerLines.
+  if (Array.isArray(parsed.headerLines)) {
+    const line = parsed.headerLines.find((h) => h.key === "list-unsubscribe");
+    if (line) {
+      const fromRaw = _parseListUnsubscribeHeader(line.line || "");
+      if (fromRaw) return fromRaw;
+    }
+  }
+  return null;
+}
+
 async function showEmail({
   email_id,
   folder = "INBOX",
@@ -792,6 +835,7 @@ async function showEmail({
       html_length: htmlText.length,
       body_truncated: bodyTruncated,
       html_truncated: htmlTruncated,
+      list_unsubscribe: _extractListUnsubscribe(parsed),
     };
   });
 }
@@ -881,6 +925,7 @@ async function showEmails({
           html_length: htmlText.length,
           body_truncated: bodyTruncated,
           html_truncated: htmlTruncated,
+          list_unsubscribe: _extractListUnsubscribe(parsed),
         });
       } catch (e) {
         failed_ids.push({ id, error: e && e.message ? e.message : "fetch failed" });
@@ -934,6 +979,13 @@ async function markEmails({ email_ids, mark_as, folder = "INBOX", account_id = "
       }
     }
     const marked = results.filter((r) => r.success).length;
+    if (marked > 0) {
+      await syncDb.invalidateFolderUnreadCount({
+        dbPath: paths.getPathConfig().emailSyncDb,
+        accountId: acc.account.id,
+        folder: openFolder,
+      });
+    }
     return {
       success: marked === results.length,
       marked_count: marked,
@@ -945,18 +997,35 @@ async function markEmails({ email_ids, mark_as, folder = "INBOX", account_id = "
   });
 }
 
-async function _findTrashFolder(client, preferredName) {
-  const pref = String(preferredName || "").trim();
-  const listResult = await client.list();
-  const iterate = listResult && typeof listResult[Symbol.asyncIterator] === "function"
-    ? listResult
-    : Array.isArray(listResult)
-      ? listResult
-      : [];
+function _trashFolderCandidates(account, preferredName) {
+  const raw = account && account.raw ? account.raw : {};
+  const candidates = [
+    preferredName,
+    raw.trash_folder,
+    raw.trashFolder,
+    raw.trash,
+    raw.folders && raw.folders.trash,
+    "Trash",
+    "已删除",
+    "Deleted Items",
+    "[Gmail]/Trash",
+  ];
+  const out = [];
+  for (const name of candidates) {
+    const s = String(name || "").trim();
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+async function _findTrashFolder(client, preferredName, account) {
+  const candidates = _trashFolderCandidates(account, preferredName);
+  const candidateSet = new Set(candidates);
+  const mailboxes = await _listMailboxes(client);
 
   let exactMatch = "";
   let bySpecialUse = "";
-  for await (const mb of iterate) {
+  for (const mb of mailboxes) {
     const pathName = mb.path || mb.name || "";
     if (!pathName) continue;
     const special = String(mb.specialUse || "");
@@ -965,19 +1034,23 @@ async function _findTrashFolder(client, preferredName) {
       // \Trash is authoritative; stop searching as soon as we find it.
       break;
     }
-    if (pref && pathName === pref) exactMatch = pathName;
+    if (!exactMatch && candidateSet.has(pathName)) exactMatch = pathName;
   }
 
   if (bySpecialUse) return bySpecialUse;
   if (exactMatch) return exactMatch;
-  // No \Trash special-use and no exact preferred-name match: fail loudly so
-  // we don't silently fall through to a non-existent "Trash" folder, which
+  // No \Trash special-use and no known-name match: fail loudly so
+  // we don't silently fall through to a non-existent trash folder, which
   // would error out per UID inside messageMove anyway.
   throw new Error(
-    pref
-      ? `Trash folder not found: server has no \\Trash special-use mailbox and "${pref}" does not exist. Pass --trash-folder <name> or use --permanent.`
-      : "Trash folder not found: server has no \\Trash special-use mailbox. Pass --trash-folder <name> or use --permanent."
+    `Trash folder not found: server has no \\Trash special-use mailbox and none of these folders exist: ${candidates.join(", ")}. Pass --trash-folder <name> or use --permanent.`
   );
+}
+
+async function _uidExistsInFolder(client, folder, uid) {
+  await client.mailboxOpen(folder);
+  const msg = await client.fetchOne(Number(uid), { flags: true }, { uid: true });
+  return Boolean(msg);
 }
 
 async function deleteEmails({ email_ids, folder = "INBOX", permanent = false, trash_folder = "Trash", account_id = "", dry_run = false } = {}) {
@@ -1005,9 +1078,14 @@ async function deleteEmails({ email_ids, folder = "INBOX", permanent = false, tr
     const results = [];
 
     let trashName = "";
+    async function ensureTrashName() {
+      if (!trashName) trashName = await _findTrashFolder(client, trash_folder, acc.account);
+      return trashName;
+    }
+
     if (!permanent) {
       try {
-        trashName = await _findTrashFolder(client, trash_folder);
+        trashName = await ensureTrashName();
       } catch (e) {
         return { success: false, error: e && e.message ? e.message : "Trash folder lookup failed" };
       }
@@ -1015,6 +1093,40 @@ async function deleteEmails({ email_ids, folder = "INBOX", permanent = false, tr
 
     for (const uid of uids) {
       try {
+        // eslint-disable-next-line no-await-in-loop
+        const sourceExists = await _uidExistsInFolder(client, openFolder, uid);
+        if (!sourceExists) {
+          let foundInTrash = false;
+          let existingTrashName = "";
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            existingTrashName = await ensureTrashName();
+            // eslint-disable-next-line no-await-in-loop
+            foundInTrash = existingTrashName !== openFolder && await _uidExistsInFolder(client, existingTrashName, uid);
+          } catch {
+            foundInTrash = false;
+          }
+          if (foundInTrash) {
+            results.push({
+              success: true,
+              email_id: String(uid),
+              folder: existingTrashName,
+              account_id: acc.account.id,
+              already_deleted: true,
+            });
+          } else {
+            results.push({
+              success: false,
+              email_id: String(uid),
+              folder: openFolder,
+              account_id: acc.account.id,
+              error: "Email not found in source folder or trash",
+            });
+          }
+          continue;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await client.mailboxOpen(openFolder);
         // eslint-disable-next-line no-await-in-loop
         if (permanent) await client.messageDelete(uid, { uid: true });
         else await client.messageMove(uid, trashName, { uid: true });

@@ -491,10 +491,25 @@ async function upsertEmails({ dbPath, accountId, folderId, emails }) {
   }
 }
 
+async function invalidateFolderUnreadCount({ dbPath, accountId, folder }) {
+  try {
+    await withWriteSession(dbPath, (s) => {
+      s.db.run(
+        "UPDATE folders SET unread_count = NULL WHERE account_id = ? AND name = ?",
+        [String(accountId), String(folder)]
+      );
+    });
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e && e.message ? e.message : "db error" };
+  }
+}
+
 module.exports = {
   listEmailsFromCache,
   upsertAccount,
   upsertFolder,
   upsertEmails,
+  invalidateFolderUnreadCount,
   withWriteSession,
 };

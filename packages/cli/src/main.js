@@ -173,7 +173,8 @@ function _parseEmailRef(raw) {
 // override is provided.
 function _resolveEmailRefs(rawIds, explicitAccountId) {
   const arr = Array.isArray(rawIds) ? rawIds : [rawIds];
-  const refs = arr.map(_parseEmailRef);
+  const flat = arr.flatMap((id) => String(id).split(/[\s,]+/).filter(Boolean));
+  const refs = flat.map(_parseEmailRef);
   let resolved = explicitAccountId || "";
   const fromGids = new Set(refs.map((r) => r.account_id).filter(Boolean));
   if (!resolved && fromGids.size === 1) resolved = [...fromGids][0];

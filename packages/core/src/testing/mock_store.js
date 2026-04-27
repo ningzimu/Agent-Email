@@ -21,6 +21,7 @@ function _ensureState() {
                   flags: new Set(["\\Seen"]),
                   body: "hello world",
                   html: "<p>hello world</p>",
+                  listUnsubscribe: "<mailto:unsubscribe@example.com>, <https://example.com/unsubscribe>",
                   attachments: [],
                 },
                 {
