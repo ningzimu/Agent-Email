@@ -65,11 +65,14 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Ensure npm supports OIDC publish
+      - name: Verify npm version supports OIDC publish
         shell: bash
         run: |
           set -euo pipefail
-          npm i -g npm@^11.5.1
+          # Node 22 ships npm 10+; both support OIDC trusted publishing.
+          # We previously did `npm i -g npm@^11.5.1` here but that
+          # periodically bricks itself with MODULE_NOT_FOUND on
+          # `promise-retry` — the default npm is fine.
           npm --version
 
       - uses: pnpm/action-setup@v4

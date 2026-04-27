@@ -7,10 +7,14 @@ on:
 
 permissions:
   contents: write
+  actions: write   # needed for the explicit publish-npm dispatch fallback below
 
 jobs:
   release:
     runs-on: ubuntu-22.04
+    outputs:
+      new_release_published: ${{ steps.release.outputs.new_release_published }}
+      new_release_version:   ${{ steps.release.outputs.new_release_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,8 +35,36 @@ jobs:
         run: pnpm install
 
       - name: Run semantic-release
+        id: release
         env:
-          # Use a PAT to allow tag-triggered workflows (publish-npm/release-binaries).
-          # FALLBACK: GITHUB_TOKEN (note: pushes from GITHUB_TOKEN won't trigger workflows).
+          # Prefer a PAT so the tag push triggers downstream workflows
+          # (publish-npm / release-binaries). With plain GITHUB_TOKEN the
+          # tag push is silenced, and we fall back to dispatching
+          # publish-npm manually in the next step.
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-        run: pnpm release
+        run: |
+          set -euo pipefail
+          # Capture the version semantic-release decided on so we can
+          # forward it to publish-npm if needed. semantic-release writes
+          # this to its own output via env contracts; we approximate by
+          # diffing the latest tag before/after.
+          before=$(git tag --sort=-v:refname | head -1 || true)
+          pnpm release
+          after=$(git tag --sort=-v:refname | head -1 || true)
+          if [ -n "$after" ] && [ "$after" != "$before" ]; then
+            echo "new_release_published=true" >> "$GITHUB_OUTPUT"
+            echo "new_release_version=$after" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_release_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger publish-npm (fallback when no RELEASE_TOKEN)
+        if: steps.release.outputs.new_release_published == 'true' && env.HAS_PAT != 'true'
+        env:
+          HAS_PAT: ${{ secrets.RELEASE_TOKEN != '' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.new_release_version }}"
+          echo "Dispatching publish-npm for $version"
+          gh workflow run publish-npm.yml -f version="$version"
