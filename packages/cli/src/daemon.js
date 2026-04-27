@@ -203,13 +203,24 @@ const LAUNCHD_LABEL = "com.leeguoo.mailbox.daemon";
 const SYSTEMD_UNIT = "mailbox-daemon.service";
 
 function _resolveCliExecutable() {
-  // Returns { node, script } — node binary (absolute) and the .js entry
-  // point (absolute, may not be marked executable so launchd needs to
-  // invoke it via node explicitly).
+  // Returns { node, script } describing how to re-invoke the CLI from a
+  // launchd / systemd unit file.
+  //
+  // - In a normal `node /path/to/mailbox.js …` invocation we return
+  //   { node: process.execPath, script: argv[1] } so the unit reads
+  //   `node /abs/path/mailbox.js daemon start …`.
+  //
+  // - In a pkg-bundled binary (the npm distribution), `process.execPath`
+  //   IS the standalone binary and `process.argv[1]` is `/snapshot/...`
+  //   — a virtual path that only exists inside the binary's embedded
+  //   filesystem. In that case the unit must invoke the binary directly
+  //   with no script argument. We signal that by returning node = "".
   const argv1 = process.argv[1] || "";
-  const node = process.execPath || "node";
-  if (argv1 && fs.existsSync(argv1)) return { node, script: argv1 };
-  return { node, script: "mailbox" };
+  const exe = process.execPath || "node";
+  const isPkgBundle = argv1.startsWith("/snapshot/") || (typeof process.pkg !== "undefined");
+  if (isPkgBundle) return { node: "", script: exe };
+  if (argv1 && fs.existsSync(argv1)) return { node: exe, script: argv1 };
+  return { node: exe, script: "mailbox" };
 }
 
 function _autostartPaths() {
@@ -231,24 +242,28 @@ function _autostartPaths() {
   return { kind: "unsupported", unitPath: "", logPath: "" };
 }
 
+function _xml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 function _renderLaunchdPlist({ node, script, syncIntervalSec, logPath }) {
+  // node === "" means the script IS a self-contained binary (pkg).
+  const programArgs = (node ? [node, script] : [script])
+    .concat(["daemon", "start", "--sync-interval", String(syncIntervalSec)]);
+  const argsXml = programArgs.map((a) => `    <string>${_xml(a)}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>Label</key><string>${_xml(LAUNCHD_LABEL)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${node}</string>
-    <string>${script}</string>
-    <string>daemon</string>
-    <string>start</string>
-    <string>--sync-interval</string><string>${syncIntervalSec}</string>
+${argsXml}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${logPath}</string>
-  <key>StandardErrorPath</key><string>${logPath}</string>
+  <key>StandardOutPath</key><string>${_xml(logPath)}</string>
+  <key>StandardErrorPath</key><string>${_xml(logPath)}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
@@ -259,13 +274,22 @@ function _renderLaunchdPlist({ node, script, syncIntervalSec, logPath }) {
 `;
 }
 
+function _shellQuote(s) {
+  // Quote for systemd ExecStart (shell-like splitting). Wrap in
+  // double quotes and escape embedded ones; safe for paths with spaces.
+  return `"${String(s).replace(/(["\\$])/g, "\\$1")}"`;
+}
+
 function _renderSystemdUnit({ node, script, syncIntervalSec }) {
+  const cmdParts = (node ? [node, script] : [script])
+    .concat(["daemon", "start", "--sync-interval", String(syncIntervalSec)]);
+  const cmdLine = cmdParts.map(_shellQuote).join(" ");
   return `[Unit]
 Description=Mailbox CLI persistent IMAP daemon
 After=network-online.target
 
 [Service]
-ExecStart=${node} ${script} daemon start --sync-interval ${syncIntervalSec}
+ExecStart=${cmdLine}
 Restart=always
 RestartSec=5
 
