@@ -226,7 +226,9 @@ async function main(argv) {
   emailCmd
     .command("search")
     .description("Search emails")
-    .requiredOption("--query <q>", "Query")
+    .option("--query <q>", "Free-text query (IMAP TEXT, matches body+headers)")
+    .option("--from <s>", "Filter by sender (IMAP FROM, substring match)")
+    .option("--subject <s>", "Filter by subject (IMAP SUBJECT, substring match)")
     .option("--account-id <id>")
     .option("--date-from <s>")
     .option("--date-to <s>")
@@ -235,8 +237,18 @@ async function main(argv) {
     .option("--unread-only")
     .option("--folder <name>", "Folder", "all")
     .action(async (opts) => {
+      if (!opts.query && !opts.from && !opts.subject && !opts.dateFrom && !opts.dateTo && !opts.unreadOnly) {
+        const rc = contract.invalidUsage({
+          message: "Provide at least one of --query, --from, --subject, --date-from, --date-to, --unread-only",
+          asJson,
+          pretty,
+        });
+        process.exit(rc);
+      }
       const result = await email.searchEmails({
-        query: opts.query,
+        query: opts.query || "",
+        from: opts.from || "",
+        subject: opts.subject || "",
         account_id: opts.accountId || "",
         date_from: opts.dateFrom || "",
         date_to: opts.dateTo || "",
