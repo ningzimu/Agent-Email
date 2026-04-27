@@ -118,20 +118,34 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
   const openFolder = _normalizeFolder(folder);
   return withImapClient(account, async (client) => {
     const st = await client.mailboxOpen(openFolder);
-    // mailboxOpen.unseen is the SEQUENCE NUMBER of the first unseen
-    // message (often undefined on Gmail when there's no first-unseen
-    // marker), not the unread count. Issue STATUS UNSEEN to get the
-    // real count. One extra round-trip per call but correctness wins.
-    let unseenCount = 0;
-    try {
-      const ss = await client.status(openFolder, { unseen: true });
-      if (ss && ss.unseen != null) unseenCount = Number(ss.unseen);
-    } catch { /* not all servers support STATUS on the selected mailbox */ }
     // ImapFlow defaults to sequence numbers; force UID mode.
     const criteria = unreadOnly ? { seen: false } : { all: true };
     if (since) criteria.since = since;
     if (before) criteria.before = before;
     const uids = await client.search(criteria, { uid: true });
+
+    // mailboxOpen.unseen is the SEQUENCE NUMBER of the first unseen
+    // message (often undefined on Gmail when there's no first-unseen
+    // marker), not the unread count. Issue STATUS UNSEEN to get the
+    // real count — except when we just ran SEARCH UNSEEN ourselves,
+    // because then the search result IS the unread count and a STATUS
+    // round-trip would be redundant.
+    let unseenCount = 0;
+    let unseenStatusError = null;
+    if (unreadOnly) {
+      unseenCount = Array.isArray(uids) ? uids.length : 0;
+    } else {
+      try {
+        const ss = await client.status(openFolder, { unseen: true });
+        if (ss && ss.unseen != null) unseenCount = Number(ss.unseen);
+      } catch (e) {
+        // Some servers reject STATUS on the SELECTED mailbox. Surface the
+        // failure as an explicit field so callers can tell "0 unread" from
+        // "we couldn't ask". Also log when debug is on.
+        unseenStatusError = (e && e.message) || String(e);
+        if (process.env.MAILBOX_DAEMON_DEBUG) process.stderr.write(`mailbox: STATUS UNSEEN failed for ${account.email}/${openFolder}: ${unseenStatusError}\n`);
+      }
+    }
     const sorted = _uidsSortedDesc(uids);
     const slice = sorted.slice(offset, offset + limit);
 
@@ -185,6 +199,7 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
       emails,
       total_in_folder: Number(st.exists || 0),
       unread_count: unseenCount,
+      ...(unseenStatusError ? { unread_count_unavailable: true, unread_count_error: unseenStatusError } : {}),
       fetched: emails.length,
       folder: openFolder,
     };

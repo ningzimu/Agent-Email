@@ -356,6 +356,12 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       filterParams.push(resolvedFolder);
       filterParams.push(resolvedFolder);
     }
+    // Snapshot the query BEFORE the unread filter so cached_emails is a
+    // diagnostic of "how much is in cache for this scope" — independent
+    // of whether this particular call asked for unread-only.
+    const queryBeforeUnread = query;
+    const filterParamsBeforeUnread = [...filterParams];
+
     if (unreadOnly) {
       query += " AND e.is_read = 0";
     }
@@ -368,10 +374,15 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       filterParams.push(String(dateTo));
     }
 
-    // Snapshot filter params before appending pagination, so the totals queries
-    // don't depend on params.slice arithmetic.
-    const totalSql = `SELECT COUNT(*) FROM (${query})`;
-    const unreadSql = `SELECT COUNT(*) FROM (${query} AND e.is_read = 0)`;
+    // cached_emails: total cache rows for the scope (account+folder+date),
+    //                ignoring the unread filter so the value is comparable
+    //                across calls.
+    // cached_unread: explicit unread count over the same scope.
+    const totalSql = `SELECT COUNT(*) FROM (${queryBeforeUnread}${dateFrom ? " AND e.date_sent >= ?" : ""}${dateTo ? " AND e.date_sent <= ?" : ""})`;
+    const totalParams = [...filterParamsBeforeUnread];
+    if (dateFrom) totalParams.push(String(dateFrom));
+    if (dateTo) totalParams.push(String(dateTo));
+    const unreadSql = `SELECT COUNT(*) FROM (${queryBeforeUnread}${dateFrom ? " AND e.date_sent >= ?" : ""}${dateTo ? " AND e.date_sent <= ?" : ""} AND e.is_read = 0)`;
 
     const pagedQuery = query + " ORDER BY e.date_sent DESC LIMIT ? OFFSET ?";
     const pagedParams = [...filterParams, Number(limit), Number(offset)];
@@ -396,8 +407,8 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
     // Counts within the cached subset. Note: the daemon syncs only the
     // newest N emails per account (default 200), so these can be a lot
     // smaller than the real IMAP folder size.
-    const cached_emails = Number(_execScalar(h.db, totalSql, filterParams) || emails.length);
-    const cached_unread = Number(_execScalar(h.db, unreadSql, filterParams) || emails.filter((e) => e.unread).length);
+    const cached_emails = Number(_execScalar(h.db, totalSql, totalParams) || 0);
+    const cached_unread = Number(_execScalar(h.db, unreadSql, totalParams) || 0);
 
     // Real folder size + unread count, snapshotted from IMAP STATUS at the
     // last sync. Surfaces folders.message_count / folders.unread_count when

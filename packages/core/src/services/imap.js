@@ -71,13 +71,20 @@ async function testConnection(account, folder) {
       const total = Number(mb.exists || 0);
       // `mb.unseen` is the SEQUENCE of the first unseen message (often
       // undefined on Gmail), not the unread count. STATUS UNSEEN gives
-      // the real number.
+      // the real number. Surface the failure explicitly so callers can
+      // tell "0 unread" from "we couldn't ask".
       let unseen = 0;
+      let unreadError = null;
       try {
         const ss = await client.status(openFolder, { unseen: true });
         if (ss && ss.unseen != null) unseen = Number(ss.unseen);
-      } catch { /* fall back to 0 if STATUS fails */ }
-      return { success: true, total_emails: total, unread_emails: unseen };
+      } catch (e) {
+        unreadError = (e && e.message) || String(e);
+        if (process.env.MAILBOX_DAEMON_DEBUG) process.stderr.write(`mailbox: STATUS UNSEEN failed for ${account.email}/${openFolder}: ${unreadError}\n`);
+      }
+      const out = { success: true, total_emails: total, unread_emails: unseen };
+      if (unreadError) { out.unread_emails_unavailable = true; out.unread_emails_error = unreadError; }
+      return out;
     } finally {
       if (lock && typeof lock.release === "function") lock.release();
     }
