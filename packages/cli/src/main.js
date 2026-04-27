@@ -13,6 +13,42 @@ function _printTextNotImplemented(label) {
 
 const MAX_BODY_FILE_BYTES = Number(process.env.MAILBOX_MAX_BODY_FILE_BYTES || 10 * 1024 * 1024); // 10 MiB
 
+// Hard upper bound on per-call result limits. Without this, a typo like
+// --limit 99999999 would happily try to fetch the entire mailbox (and
+// trigger IMAP rate limits / OOM). Override via env if you really need it.
+const MAX_RESULT_LIMIT = Number(process.env.MAILBOX_MAX_LIMIT || 1000);
+
+// Validate --limit/--offset. Returns { ok, limit, offset, error }.
+function _validatePaging(limitRaw, offsetRaw, { defaultLimit }) {
+  const limit = limitRaw == null || limitRaw === "" ? defaultLimit : Number(limitRaw);
+  const offset = offsetRaw == null || offsetRaw === "" ? 0 : Number(offsetRaw);
+  if (!Number.isFinite(limit) || limit < 0) {
+    return { ok: false, error: `--limit must be a non-negative number (got ${limitRaw})` };
+  }
+  if (!Number.isFinite(offset) || offset < 0) {
+    return { ok: false, error: `--offset must be a non-negative number (got ${offsetRaw})` };
+  }
+  if (limit > MAX_RESULT_LIMIT) {
+    return { ok: false, error: `--limit ${limit} exceeds MAILBOX_MAX_LIMIT=${MAX_RESULT_LIMIT}; raise the env var if intentional` };
+  }
+  return { ok: true, limit, offset };
+}
+
+// Validate a date string the same way _parseDateInput in core/email.js does.
+// We only reject if the user supplied something unparseable — empty is fine.
+function _validateDateOpt(name, raw) {
+  const value = String(raw || "").trim();
+  if (!value) return { ok: true };
+  // YYYY-MM-DD shortcut accepted by core
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const d = new Date(`${value}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) return { ok: true };
+  }
+  const d = new Date(value);
+  if (!Number.isNaN(d.getTime())) return { ok: true };
+  return { ok: false, error: `${name} value "${value}" is not a valid date (expected YYYY-MM-DD or ISO 8601)` };
+}
+
 function _readBodyFile(bodyFilePath) {
   const st = fs.statSync(bodyFilePath);
   if (st.size > MAX_BODY_FILE_BYTES) {
@@ -86,6 +122,12 @@ async function main(argv) {
   program.name("mailbox");
   program.version(_resolveCliVersion(), "-v, --version", "output the version");
   program.exitOverride();
+  // Suppress commander's default "error: ..." stderr line — we surface the
+  // same message via the JSON contract (or via invalidUsage on stderr) and
+  // don't want the message to appear twice (once raw, once wrapped in JSON).
+  program.configureOutput({
+    writeErr: () => {},
+  });
 
   const accountCmd = program.command("account").description("Account operations");
   accountCmd
@@ -196,12 +238,24 @@ async function main(argv) {
     .option("--account-id <id>", "Account id/email")
     .option("--date-from <s>", "Filter from date (YYYY-MM-DD or ISO)")
     .option("--date-to <s>", "Filter to date (YYYY-MM-DD or ISO)")
-    .option("--folder <name>", "Folder", "all")
+    .option("--folder <name>", "Folder (currently only INBOX is supported here; use 'email search' for cross-folder)", "INBOX")
     .option("--live", "Force live IMAP (no cache)")
     .action(async (opts) => {
+      const paging = _validatePaging(opts.limit, opts.offset, { defaultLimit: 100 });
+      if (!paging.ok) {
+        const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
+        process.exit(rc);
+      }
+      for (const [name, val] of [["--date-from", opts.dateFrom], ["--date-to", opts.dateTo]]) {
+        const v = _validateDateOpt(name, val);
+        if (!v.ok) {
+          const rc = contract.invalidUsage({ message: v.error, asJson, pretty });
+          process.exit(rc);
+        }
+      }
       const result = await email.listEmails({
-        limit: Number(opts.limit),
-        offset: Number(opts.offset),
+        limit: paging.limit,
+        offset: paging.offset,
         unread_only: Boolean(opts.unreadOnly),
         folder: opts.folder,
         account_id: opts.accountId || "",
@@ -210,8 +264,8 @@ async function main(argv) {
         use_cache: !Boolean(opts.live),
       });
       // Add contract parity fields.
-      result.limit = Number(opts.limit);
-      result.offset = Number(opts.offset);
+      result.limit = paging.limit;
+      result.offset = paging.offset;
       result.unread_only = Boolean(opts.unreadOnly);
       result.folder = opts.folder;
       result.use_cache = !Boolean(opts.live);
@@ -245,6 +299,18 @@ async function main(argv) {
         });
         process.exit(rc);
       }
+      const paging = _validatePaging(opts.limit, opts.offset, { defaultLimit: 50 });
+      if (!paging.ok) {
+        const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
+        process.exit(rc);
+      }
+      for (const [name, val] of [["--date-from", opts.dateFrom], ["--date-to", opts.dateTo]]) {
+        const v = _validateDateOpt(name, val);
+        if (!v.ok) {
+          const rc = contract.invalidUsage({ message: v.error, asJson, pretty });
+          process.exit(rc);
+        }
+      }
       const result = await email.searchEmails({
         query: opts.query || "",
         from: opts.from || "",
@@ -252,8 +318,8 @@ async function main(argv) {
         account_id: opts.accountId || "",
         date_from: opts.dateFrom || "",
         date_to: opts.dateTo || "",
-        limit: Number(opts.limit),
-        offset: Number(opts.offset),
+        limit: paging.limit,
+        offset: paging.offset,
         unread_only: Boolean(opts.unreadOnly),
         folder: opts.folder,
       });
@@ -368,6 +434,8 @@ async function main(argv) {
     .option("--bcc <bcc...>")
     .option("--account-id <id>")
     .option("--is-html")
+    .option("--confirm", "Actually send (default: dry-run)")
+    .option("--dry-run")
     .action(async (opts) => {
       const hasBody = typeof opts.body === "string" && opts.body.length;
       const hasBodyFile = Boolean(opts.bodyFile);
@@ -384,6 +452,27 @@ async function main(argv) {
           const rc = contract.invalidUsage({ message: e && e.message ? e.message : "Failed to read body file", asJson, pretty });
           process.exit(rc);
         }
+      }
+      const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
+      if (dryRun) {
+        const result = {
+          success: true,
+          dry_run: true,
+          would_send: {
+            to: opts.to,
+            cc: opts.cc || [],
+            bcc: opts.bcc || [],
+            subject: opts.subject,
+            account_id: opts.accountId || "",
+            is_html: Boolean(opts.isHtml),
+            body_bytes: Buffer.byteLength(body, "utf8"),
+            body_preview: body.slice(0, 200),
+          },
+          confirmation_required: true,
+          confirmation_hint: "Re-run with --confirm to actually send",
+        };
+        const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email send") });
+        process.exit(rc);
       }
       const result = await email.sendEmail({
         to: opts.to,
@@ -753,7 +842,10 @@ async function main(argv) {
       return 0;
     }
     // commander throws on invalid usage (exitOverride).
-    const message = err && err.message ? err.message : "Invalid usage";
+    let message = err && err.message ? err.message : "Invalid usage";
+    // Strip commander's own "error: " prefix so the JSON payload doesn't
+    // end up with `"error": "error: ..."`.
+    message = String(message).replace(/^error:\s*/i, "");
     return contract.invalidUsage({ message, asJson, pretty });
   }
 }
