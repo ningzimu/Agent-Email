@@ -1231,6 +1231,39 @@ async function main(argv) {
       process.exit(rc);
     });
 
+  // watch
+  emailCmd
+    .command("watch")
+    .description("Stream new emails as they arrive (IMAP IDLE). Prints one NDJSON line per match; runs until SIGINT.")
+    .argument("[folder]", "Folder to watch", "INBOX")
+    .requiredOption("--account-id <id>")
+    .option("--filter-from <s>", "Only emit emails whose sender includes this substring")
+    .option("--filter-subject <s>", "Only emit emails whose subject includes this substring")
+    .action(async (folder, opts) => {
+      const onEvent = (evt) => {
+        process.stdout.write(JSON.stringify(evt) + "\n");
+      };
+      const result = await email.watchFolder({
+        account_id: opts.accountId,
+        folder: folder || "INBOX",
+        filter: { from: opts.filterFrom || "", subject: opts.filterSubject || "" },
+        onEvent,
+      });
+      if (!result || !result.success) {
+        const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => process.stderr.write((result && result.error) || "watch failed\n") });
+        process.exit(rc);
+      }
+      process.stderr.write(`watching ${result.folder} on ${result.account_id} (Ctrl-C to stop)\n`);
+      const stop = async () => {
+        try { await result.stop(); } catch { /* ignore */ }
+        process.exit(0);
+      };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      await result.done;
+      process.exit(0);
+    });
+
   // mcp
   const mcpCmd = program.command("mcp").description("Model Context Protocol server (for Claude Desktop / Code / Cursor / etc.)");
   mcpCmd
