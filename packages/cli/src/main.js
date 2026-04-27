@@ -147,6 +147,38 @@ const MAX_BODY_FILE_BYTES = Number(process.env.MAILBOX_MAX_BODY_FILE_BYTES || 10
 // trigger IMAP rate limits / OOM). Override via env if you really need it.
 const MAX_RESULT_LIMIT = Number(process.env.MAILBOX_MAX_LIMIT || 1000);
 
+// Parse a global email ref. Accepts either "account_id:uid" or a bare uid.
+// Returns { id, account_id } where account_id is "" if not present in the
+// ref. Caller should fall back to --account-id when account_id is empty.
+function _parseEmailRef(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return { id: "", account_id: "" };
+  const idx = s.lastIndexOf(":");
+  // Only treat as gid when the right side is all digits and the left side
+  // is non-empty — preserves bare-UID inputs and tolerates accounts that
+  // happen to contain colons (none in practice but defensive).
+  if (idx > 0 && /^\d+$/.test(s.slice(idx + 1))) {
+    return { id: s.slice(idx + 1), account_id: s.slice(0, idx) };
+  }
+  return { id: s, account_id: "" };
+}
+
+// Resolve a list of input refs (gid or bare uid) plus an explicit
+// --account-id to { ids: [...], accountId, error? }. Returns an error
+// when the gids name multiple different accounts and no --account-id
+// override is provided.
+function _resolveEmailRefs(rawIds, explicitAccountId) {
+  const arr = Array.isArray(rawIds) ? rawIds : [rawIds];
+  const refs = arr.map(_parseEmailRef);
+  let resolved = explicitAccountId || "";
+  const fromGids = new Set(refs.map((r) => r.account_id).filter(Boolean));
+  if (!resolved && fromGids.size === 1) resolved = [...fromGids][0];
+  else if (!resolved && fromGids.size > 1) {
+    return { ids: [], accountId: "", error: `Mixed account_ids in gids (${[...fromGids].join(", ")}); pass --account-id explicitly` };
+  }
+  return { ids: refs.map((r) => r.id), accountId: resolved };
+}
+
 // Validate --limit/--offset. Returns { ok, limit, offset, error }.
 function _validatePaging(limitRaw, offsetRaw, { defaultLimit }) {
   const limit = limitRaw == null || limitRaw === "" ? defaultLimit : Number(limitRaw);
@@ -163,19 +195,62 @@ function _validatePaging(limitRaw, offsetRaw, { defaultLimit }) {
   return { ok: true, limit, offset };
 }
 
-// Validate a date string the same way _parseDateInput in core/email.js does.
-// We only reject if the user supplied something unparseable — empty is fine.
+// Resolve human-friendly date shortcuts to YYYY-MM-DD before they reach the
+// core parser. Accepts: ISO 8601, YYYY-MM-DD, "today", "yesterday",
+// relative spans like "2d", "3w", "4mo", "1y", "30m", "12h".
+function _expandDateShortcut(raw) {
+  const value = String(raw || "").trim().toLowerCase();
+  if (!value) return "";
+  const now = new Date();
+  if (value === "today") return _isoDate(now);
+  if (value === "yesterday") {
+    const d = new Date(now); d.setDate(d.getDate() - 1); return _isoDate(d);
+  }
+  if (value === "last-week" || value === "lastweek") {
+    const d = new Date(now); d.setDate(d.getDate() - 7); return _isoDate(d);
+  }
+  if (value === "last-month" || value === "lastmonth") {
+    const d = new Date(now); d.setMonth(d.getMonth() - 1); return _isoDate(d);
+  }
+  // Relative: <N><unit>  unit ∈ m h d w mo y
+  const m = value.match(/^(\d+)\s*(mo|m|h|d|w|y)$/);
+  if (m) {
+    const n = Number(m[1]);
+    const unit = m[2];
+    const d = new Date(now);
+    if (unit === "m") d.setMinutes(d.getMinutes() - n);
+    else if (unit === "h") d.setHours(d.getHours() - n);
+    else if (unit === "d") d.setDate(d.getDate() - n);
+    else if (unit === "w") d.setDate(d.getDate() - n * 7);
+    else if (unit === "mo") d.setMonth(d.getMonth() - n);
+    else if (unit === "y") d.setFullYear(d.getFullYear() - n);
+    // For coarse units (d/w/mo/y) collapse to date-only so IMAP SINCE
+    // semantics line up; for finer units keep the timestamp.
+    if (unit === "d" || unit === "w" || unit === "mo" || unit === "y") return _isoDate(d);
+    return d.toISOString();
+  }
+  return raw; // pass through to underlying parser
+}
+function _isoDate(d) {
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${da}`;
+}
+
+// Validate a date string. Accepts YYYY-MM-DD, ISO 8601, or one of the
+// relative shortcuts handled by _expandDateShortcut.
 function _validateDateOpt(name, raw) {
   const value = String(raw || "").trim();
   if (!value) return { ok: true };
-  // YYYY-MM-DD shortcut accepted by core
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const d = new Date(`${value}T00:00:00`);
-    if (!Number.isNaN(d.getTime())) return { ok: true };
+  const expanded = _expandDateShortcut(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(expanded)) {
+    const d = new Date(`${expanded}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) return { ok: true, expanded };
   }
-  const d = new Date(value);
-  if (!Number.isNaN(d.getTime())) return { ok: true };
-  return { ok: false, error: `${name} value "${value}" is not a valid date (expected YYYY-MM-DD or ISO 8601)` };
+  const d = new Date(expanded);
+  if (!Number.isNaN(d.getTime())) return { ok: true, expanded };
+  return { ok: false, error: `${name} value "${value}" is not a valid date (expected YYYY-MM-DD, ISO 8601, or relative like 2d/3w/1mo/today/yesterday)` };
 }
 
 function _readBodyFile(bodyFilePath) {
@@ -239,6 +314,49 @@ function _resolveCliVersion() {
   }
 
   return "0.0.0";
+}
+
+// Recursively serialize a commander Command into a JSON descriptor that an
+// AI agent can introspect. Returns null if cmd is missing.
+function _commandToJson(cmd) {
+  if (!cmd) return null;
+  const out = {
+    name: cmd.name(),
+    description: cmd.description() || "",
+    usage: cmd.usage() || "",
+    arguments: (cmd._args || cmd.registeredArguments || []).map((a) => ({
+      name: a.name(),
+      description: a.description || "",
+      required: Boolean(a.required),
+      variadic: Boolean(a.variadic),
+      default: a.defaultValue,
+    })),
+    options: (cmd.options || []).map((o) => ({
+      flags: o.flags,
+      long: o.long || "",
+      short: o.short || "",
+      description: o.description || "",
+      required: Boolean(o.required),
+      optional: Boolean(o.optional),
+      default: o.defaultValue,
+      negate: Boolean(o.negate),
+    })),
+    subcommands: (cmd.commands || []).filter((c) => !c._hidden && c.name() !== "help").map((c) => ({
+      name: c.name(),
+      description: c.description() || "",
+    })),
+  };
+  return out;
+}
+function _findCommandPath(program, argv) {
+  let cur = program;
+  for (const tok of argv) {
+    if (tok.startsWith("-")) break;
+    const next = (cur.commands || []).find((c) => c.name() === tok);
+    if (!next) break;
+    cur = next;
+  }
+  return cur;
 }
 
 async function main(argv) {
@@ -380,12 +498,15 @@ async function main(argv) {
         const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
         process.exit(rc);
       }
-      for (const [name, val] of [["--date-from", opts.dateFrom], ["--date-to", opts.dateTo]]) {
-        const v = _validateDateOpt(name, val);
+      let dateFromExpanded = opts.dateFrom || "";
+      let dateToExpanded = opts.dateTo || "";
+      for (const [name, valGet, set] of [["--date-from", () => opts.dateFrom, (v) => (dateFromExpanded = v)], ["--date-to", () => opts.dateTo, (v) => (dateToExpanded = v)]]) {
+        const v = _validateDateOpt(name, valGet());
         if (!v.ok) {
           const rc = contract.invalidUsage({ message: v.error, asJson, pretty });
           process.exit(rc);
         }
+        if (v.expanded) set(v.expanded);
       }
       const previewChars = opts.withPreview != null ? Math.max(0, Math.min(2000, Number(opts.withPreview) || 0)) : 0;
       const result = await email.listEmails({
@@ -394,8 +515,8 @@ async function main(argv) {
         unread_only: Boolean(opts.unreadOnly),
         folder: opts.folder,
         account_id: opts.accountId || "",
-        date_from: opts.dateFrom || "",
-        date_to: opts.dateTo || "",
+        date_from: dateFromExpanded,
+        date_to: dateToExpanded,
         use_cache: !Boolean(opts.live),
         preview_chars: previewChars,
       });
@@ -441,12 +562,15 @@ async function main(argv) {
         const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
         process.exit(rc);
       }
-      for (const [name, val] of [["--date-from", opts.dateFrom], ["--date-to", opts.dateTo]]) {
-        const v = _validateDateOpt(name, val);
+      let dateFromExpanded = opts.dateFrom || "";
+      let dateToExpanded = opts.dateTo || "";
+      for (const [name, valGet, set] of [["--date-from", () => opts.dateFrom, (v) => (dateFromExpanded = v)], ["--date-to", () => opts.dateTo, (v) => (dateToExpanded = v)]]) {
+        const v = _validateDateOpt(name, valGet());
         if (!v.ok) {
           const rc = contract.invalidUsage({ message: v.error, asJson, pretty });
           process.exit(rc);
         }
+        if (v.expanded) set(v.expanded);
       }
       const previewChars = opts.withPreview != null ? Math.max(0, Math.min(2000, Number(opts.withPreview) || 0)) : 0;
       const result = await email.searchEmails({
@@ -454,8 +578,8 @@ async function main(argv) {
         from: opts.from || "",
         subject: opts.subject || "",
         account_id: opts.accountId || "",
-        date_from: opts.dateFrom || "",
-        date_to: opts.dateTo || "",
+        date_from: dateFromExpanded,
+        date_to: dateToExpanded,
         limit: paging.limit,
         offset: paging.offset,
         unread_only: Boolean(opts.unreadOnly),
@@ -495,10 +619,15 @@ async function main(argv) {
         bodyMax = 400;
         if (!htmlMax && includeHtml) htmlMax = 2000;
       }
-      const ids = Array.isArray(emailIds) ? emailIds : [emailIds];
+      const refs = _resolveEmailRefs(emailIds, opts.accountId);
+      if (refs.error) {
+        const rc = contract.invalidUsage({ message: refs.error, asJson, pretty });
+        process.exit(rc);
+      }
+      const ids = refs.ids;
       const baseOpts = {
         folder: opts.folder,
-        account_id: opts.accountId || "",
+        account_id: refs.accountId,
         body_max_len: bodyMax,
         html_max_len: htmlMax,
         include_html: includeHtml,
@@ -533,13 +662,18 @@ async function main(argv) {
         process.exit(rc);
       }
 
+      const refs = _resolveEmailRefs(ids, opts.accountId);
+      if (refs.error) {
+        const rc = contract.invalidUsage({ message: refs.error, asJson, pretty });
+        process.exit(rc);
+      }
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
       const mark_as = unread ? "unread" : "read";
       const result = await email.markEmails({
-        email_ids: ids,
+        email_ids: refs.ids,
         mark_as,
         folder: opts.folder,
-        account_id: opts.accountId || "",
+        account_id: refs.accountId,
         dry_run: dryRun,
       });
       if (dryRun && !opts.dryRun && result && typeof result === "object") {
@@ -561,13 +695,18 @@ async function main(argv) {
     .option("--confirm", "Apply changes (default: dry-run)")
     .option("--dry-run")
     .action(async (ids, opts) => {
+      const refs = _resolveEmailRefs(ids, opts.accountId);
+      if (refs.error) {
+        const rc = contract.invalidUsage({ message: refs.error, asJson, pretty });
+        process.exit(rc);
+      }
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
       const result = await email.deleteEmails({
-        email_ids: ids,
+        email_ids: refs.ids,
         folder: opts.folder,
         permanent: Boolean(opts.permanent),
         trash_folder: opts.trashFolder,
-        account_id: opts.accountId || "",
+        account_id: refs.accountId,
         dry_run: dryRun,
       });
       if (dryRun && !opts.dryRun && result && typeof result === "object") {
@@ -716,11 +855,16 @@ async function main(argv) {
   emailCmd
     .command("attachments")
     .description("Download attachments")
-    .argument("<email_id>")
-    .requiredOption("--account-id <id>")
+    .argument("<email_id>", "UID or gid (account_id:uid)")
+    .option("--account-id <id>", "Required if email_id is a bare UID")
     .option("--folder <name>", "Folder", "INBOX")
     .action(async (emailId, opts) => {
-      const result = await email.downloadAttachments({ email_id: emailId, folder: opts.folder, account_id: opts.accountId });
+      const refs = _resolveEmailRefs([emailId], opts.accountId);
+      if (refs.error || !refs.accountId) {
+        const rc = contract.invalidUsage({ message: refs.error || "Missing --account-id (or pass a gid like account_id:uid)", asJson, pretty });
+        process.exit(rc);
+      }
+      const result = await email.downloadAttachments({ email_id: refs.ids[0], folder: opts.folder, account_id: refs.accountId });
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email attachments") });
       process.exit(rc);
     });
@@ -728,8 +872,8 @@ async function main(argv) {
   emailCmd
     .command("flag")
     .description("Flag/unflag an email")
-    .argument("<email_id>")
-    .requiredOption("--account-id <id>")
+    .argument("<email_id>", "UID or gid (account_id:uid)")
+    .option("--account-id <id>", "Required if email_id is a bare UID")
     .option("--set")
     .option("--unset")
     .option("--flag-type <t>", "Flag type", "flagged")
@@ -743,15 +887,20 @@ async function main(argv) {
         const rc = contract.invalidUsage({ message: "Specify exactly one of --set/--unset", asJson, pretty });
         process.exit(rc);
       }
+      const refs = _resolveEmailRefs([emailId], opts.accountId);
+      if (refs.error || !refs.accountId) {
+        const rc = contract.invalidUsage({ message: refs.error || "Missing --account-id (or pass a gid like account_id:uid)", asJson, pretty });
+        process.exit(rc);
+      }
 
       const setFlag = set;
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
       const result = await email.flagEmail({
-        email_id: emailId,
+        email_id: refs.ids[0],
         set_flag: setFlag,
         flag_type: opts.flagType,
         folder: opts.folder,
-        account_id: opts.accountId,
+        account_id: refs.accountId,
         dry_run: dryRun,
       });
       if (dryRun && !opts.dryRun && result && typeof result === "object") {
@@ -765,19 +914,24 @@ async function main(argv) {
   emailCmd
     .command("move")
     .description("Move emails to folder")
-    .argument("<email_ids...>")
+    .argument("<email_ids...>", "UIDs or gids (account_id:uid)")
     .requiredOption("--target-folder <name>")
     .option("--source-folder <name>", "Source folder", "INBOX")
-    .requiredOption("--account-id <id>")
+    .option("--account-id <id>", "Required if email_ids are bare UIDs")
     .option("--confirm", "Apply changes (default: dry-run)")
     .option("--dry-run")
     .action(async (ids, opts) => {
+      const refs = _resolveEmailRefs(ids, opts.accountId);
+      if (refs.error || !refs.accountId) {
+        const rc = contract.invalidUsage({ message: refs.error || "Missing --account-id (or pass gids like account_id:uid)", asJson, pretty });
+        process.exit(rc);
+      }
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
       const result = await email.moveEmails({
-        email_ids: ids,
+        email_ids: refs.ids,
         target_folder: opts.targetFolder,
         source_folder: opts.sourceFolder,
-        account_id: opts.accountId,
+        account_id: refs.accountId,
         dry_run: dryRun,
       });
       if (dryRun && !opts.dryRun && result && typeof result === "object") {
@@ -989,6 +1143,16 @@ async function main(argv) {
   // Default interactive mode if no command.
   if (!parsed.argv.length) {
     return contract.invalidUsage({ message: "No command provided", asJson, pretty });
+  }
+
+  // --help --json: emit a structured help descriptor for AI introspection
+  // instead of letting commander print human text and exit.
+  if (asJson && parsed.argv.some((a) => a === "--help" || a === "-h")) {
+    const argvNoHelp = parsed.argv.filter((a) => a !== "--help" && a !== "-h");
+    const cmd = _findCommandPath(program, argvNoHelp);
+    const result = { success: true, help: _commandToJson(cmd) };
+    contract.handleJsonOrText({ result, asJson, pretty, printText: () => {} });
+    return 0;
   }
 
   try {

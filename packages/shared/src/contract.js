@@ -90,10 +90,36 @@ function leanResult(result) {
   return out;
 }
 
+// Infer a stable, machine-readable error_code from a free-text error
+// message. Lets the JSON contract include both a human string (`error`)
+// and an enum (`error_code`) without rewriting every internal call site.
+const ERROR_CODE_RULES = [
+  [/^Account not found/i, "account_not_found"],
+  [/^Email not found/i, "email_not_found"],
+  [/^Mailbox not found|^Folder not found|does not exist/i, "folder_not_found"],
+  [/^Provide at least one of|^Missing |^Specify exactly one|^Invalid /i, "invalid_argument"],
+  [/is not a valid date/i, "invalid_date"],
+  [/must be a non-negative number|exceeds MAILBOX_MAX_LIMIT/i, "invalid_limit"],
+  [/^Mixed account_ids/i, "ambiguous_account"],
+  [/exceeds MAILBOX_MAX_BODY_FILE_BYTES|exceeds MAILBOX_MAX_MESSAGE_BYTES/i, "size_limit"],
+  [/AUTHENTICATIONFAILED|Invalid credentials|535[\s-]/i, "auth_failed"],
+  [/ECONNREFUSED|ETIMEDOUT|ENOTFOUND|getaddrinfo/i, "network_error"],
+  [/SMTP|Greylisted|Mail rejected/i, "smtp_error"],
+  [/IMAP|search failed|fetch failed|client\.list/i, "imap_error"],
+];
+function inferErrorCode(message) {
+  const m = String(message || "");
+  if (!m) return "unknown_error";
+  for (const [re, code] of ERROR_CODE_RULES) if (re.test(m)) return code;
+  return "operation_failed";
+}
+
 function ensureSuccessField(result) {
-  if (!result || typeof result !== "object") return { success: false, error: "Invalid result" };
-  if (typeof result.success === "boolean") return result;
-  result.success = !result.error;
+  if (!result || typeof result !== "object") return { success: false, error: "Invalid result", error_code: "invalid_result" };
+  if (typeof result.success !== "boolean") result.success = !result.error;
+  if (!result.success && result.error && !result.error_code) {
+    result.error_code = inferErrorCode(result.error);
+  }
   return result;
 }
 
@@ -119,7 +145,13 @@ function handleJsonOrText({ result, asJson, pretty, lean, printText }) {
 }
 
 function invalidUsage({ message, asJson, pretty }) {
-  const payload = { success: false, error: message || "Invalid usage" };
+  const msg = message || "Invalid usage";
+  const payload = { success: false, error: msg, error_code: inferErrorCode(msg) || "invalid_argument" };
+  // inferErrorCode falls back to "operation_failed" when nothing matches —
+  // for the invalid-usage entry point we still want "invalid_argument".
+  if (payload.error_code === "operation_failed" || payload.error_code === "unknown_error") {
+    payload.error_code = "invalid_argument";
+  }
   if (asJson) {
     printJson(payload, pretty);
   } else {
@@ -134,5 +166,6 @@ module.exports = {
   exitCodeForResult,
   handleJsonOrText,
   invalidUsage,
+  inferErrorCode,
   leanResult,
 };

@@ -145,6 +145,7 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
       const item = {
         id: String(msg.uid),
         uid: String(msg.uid),
+        gid: `${account.id}:${msg.uid}`,
         message_id: env.messageId || "",
         subject: env.subject || "",
         from: firstAddress(env.from),
@@ -504,6 +505,7 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
           const item = {
             id: String(msg.uid),
             uid: String(msg.uid),
+            gid: `${acc.id}:${msg.uid}`,
             subject: env.subject || "",
             from: firstAddress(env.from),
             to: firstAddress(env.to),
@@ -670,6 +672,7 @@ async function showEmail({
       return {
         success: true,
         id: String(raw.uid),
+        gid: `${acc.account.id}:${raw.uid}`,
         requested_id: String(id),
         from: raw.from,
         to: raw.to,
@@ -731,6 +734,7 @@ async function showEmail({
     return {
       success: true,
       id: String(msg.uid),
+      gid: `${acc.account.id}:${msg.uid}`,
       requested_id: String(id),
       from: parsed.from ? parsed.from.text || "" : firstAddress(msg.envelope && msg.envelope.from),
       to: parsed.to ? parsed.to.text || "" : firstAddress(msg.envelope && msg.envelope.to),
@@ -826,6 +830,7 @@ async function showEmails({
         if (!includeHtml) htmlOut = "";
         emails.push({
           id: String(msg.uid),
+          gid: `${acc.account.id}:${msg.uid}`,
           from: parsed.from ? parsed.from.text || "" : firstAddress(msg.envelope && msg.envelope.from),
           to: parsed.to ? parsed.to.text || "" : firstAddress(msg.envelope && msg.envelope.to),
           cc: parsed.cc ? parsed.cc.text || "" : "",

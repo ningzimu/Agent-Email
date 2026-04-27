@@ -27,17 +27,23 @@ outputs and optional text summaries.
 - Use `--with-preview <N>` on `email list` / `email search` to avoid one round-trip per email when you only need a snippet.
 - Pass multiple UIDs to `email show` instead of looping — one IMAP connection per batch.
 - `email show` defaults are now AI-friendly (no HTML, body capped at 2000 chars, URLs stripped). Pass `--full` only when you actually need raw content.
+- Use the global ID (`gid = "<account_id>:<uid>"`) returned in every list/search/show response — pass it to `email show / mark / delete / move / flag / attachments` instead of `--account-id <id> <uid>` separately. Mixed-account gids in one call are rejected.
+- Date filters accept relative shortcuts: `--date-from 2d` (2 days ago), `3w`, `1mo`, `1y`, `12h`, `30m`, `today`, `yesterday`, `last-week`, `last-month`. ISO 8601 / `YYYY-MM-DD` still work.
+- Run `mailbox <cmd> [<sub>] --help --json` to get a structured descriptor of arguments, options, defaults, required flags, and subcommands.
 
 ## Safety rules
 - Always use `--json` for automation and check `success`.
-- Include `--account-id` for destructive operations.
+- Pass either a `gid` or include `--account-id` for destructive operations.
 - Destructive operations default to dry-run unless `--confirm` is provided.
   This includes: `email send`, `email delete`, `email mark`, `email move`, `email flag`, and `digest run`.
 - Prefer `--dry-run` before mutating when available.
 
 ## Output contract
-- JSON response includes `success: boolean` (always present) and `error: string` (on failure).
+- JSON response includes `success: boolean` (always present), `error: string` and `error_code: string` (on failure).
+- Common `error_code` values: `account_not_found`, `email_not_found`, `folder_not_found`, `invalid_argument`, `invalid_date`, `invalid_limit`, `ambiguous_account`, `size_limit`, `auth_failed`, `network_error`, `imap_error`, `smtp_error`, `operation_failed`, `unknown_error`.
 - Exit codes: 0 success, 1 operation failed, 2 invalid usage.
 - `--lean` removes the following noisy top-level fields: `accounts_info`, `accounts_count`, `accounts_searched`, `search_time`, `search_params`, `failed_searches`, `partial_success`, `from_cache`, `use_cache`, `unread_only`, `folder`, `account_id`, `date_from/to`, `limit`, `offset`, `total_emails`, `total_unread`, `displayed`, plus per-email duplicates (`uid`, `to`, `flagged`, `account`, `source`, `is_flagged`, empty `preview`).
 - Per-email preview from `--with-preview` appears as `preview` (string) and `preview_truncated` (bool).
+- Every email object carries `gid` (global ID) — prefer it over the bare `id`/`uid` for cross-call references.
 - Batch `email show` returns `{ success, emails: [...], failed_ids: [{id, error}], requested, returned }` instead of a single email object.
+- `mailbox <cmd> --help --json` returns `{ success: true, help: { name, description, usage, arguments, options, subcommands } }`.

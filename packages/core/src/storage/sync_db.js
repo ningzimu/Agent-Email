@@ -380,6 +380,7 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
     const emails = rows.map((row) => ({
       id: String(row.id),
       uid: String(row.uid),
+      gid: `${row.account_id || ""}:${row.uid}`,
       message_id: row.message_id || "",
       subject: row.subject || "No Subject",
       from: row.from || "",
