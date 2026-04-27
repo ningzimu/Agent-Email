@@ -118,6 +118,15 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
   const openFolder = _normalizeFolder(folder);
   return withImapClient(account, async (client) => {
     const st = await client.mailboxOpen(openFolder);
+    // mailboxOpen.unseen is the SEQUENCE NUMBER of the first unseen
+    // message (often undefined on Gmail when there's no first-unseen
+    // marker), not the unread count. Issue STATUS UNSEEN to get the
+    // real count. One extra round-trip per call but correctness wins.
+    let unseenCount = 0;
+    try {
+      const ss = await client.status(openFolder, { unseen: true });
+      if (ss && ss.unseen != null) unseenCount = Number(ss.unseen);
+    } catch { /* not all servers support STATUS on the selected mailbox */ }
     // ImapFlow defaults to sequence numbers; force UID mode.
     const criteria = unreadOnly ? { seen: false } : { all: true };
     if (since) criteria.since = since;
@@ -175,7 +184,7 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
       success: true,
       emails,
       total_in_folder: Number(st.exists || 0),
-      unread_count: Number(st.unseen || 0),
+      unread_count: unseenCount,
       fetched: emails.length,
       folder: openFolder,
     };
