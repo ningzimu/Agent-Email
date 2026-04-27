@@ -246,11 +246,20 @@ async function main(argv) {
   let asJson = parsed.asJson;
   const pretty = parsed.pretty;
   const forceText = parsed.forceText;
+  const lean = parsed.lean;
   // Default to JSON when stdout is piped (so scripts get parseable output);
   // --text overrides this for users who want the human-readable form even
   // when piping to less/grep.
   if (forceText) asJson = false;
   else if (!asJson && !process.stdout.isTTY) asJson = true;
+  // Monkeypatch: every action calls contract.handleJsonOrText with its own
+  // {result, asJson, pretty, printText} bag. Wrap the function so we don't
+  // have to thread `lean` through every callsite — when set, it slims the
+  // result before printing.
+  const originalHandle = contract.handleJsonOrText;
+  if (lean) {
+    contract.handleJsonOrText = (args) => originalHandle({ ...args, lean: true });
+  }
 
   const program = new Command();
   program.name("mailbox");
@@ -363,6 +372,7 @@ async function main(argv) {
     .option("--date-from <s>", "Filter from date (YYYY-MM-DD or ISO)")
     .option("--date-to <s>", "Filter to date (YYYY-MM-DD or ISO)")
     .option("--folder <name>", "Folder (currently only INBOX is supported here; use 'email search' for cross-folder)", "INBOX")
+    .option("--with-preview <n>", "Also fetch a body preview of N chars per email (one extra IMAP fetch, capped at 50 emails)")
     .option("--live", "Force live IMAP (no cache)")
     .action(async (opts) => {
       const paging = _validatePaging(opts.limit, opts.offset, { defaultLimit: 100 });
@@ -377,6 +387,7 @@ async function main(argv) {
           process.exit(rc);
         }
       }
+      const previewChars = opts.withPreview != null ? Math.max(0, Math.min(2000, Number(opts.withPreview) || 0)) : 0;
       const result = await email.listEmails({
         limit: paging.limit,
         offset: paging.offset,
@@ -386,6 +397,7 @@ async function main(argv) {
         date_from: opts.dateFrom || "",
         date_to: opts.dateTo || "",
         use_cache: !Boolean(opts.live),
+        preview_chars: previewChars,
       });
       // Add contract parity fields.
       result.limit = paging.limit;
@@ -414,6 +426,7 @@ async function main(argv) {
     .option("--offset <n>", "Offset", "0")
     .option("--unread-only")
     .option("--folder <name>", "Folder", "all")
+    .option("--with-preview <n>", "Also fetch a body preview of N chars per email (one extra IMAP fetch, capped at 50 emails)")
     .action(async (opts) => {
       if (!opts.query && !opts.from && !opts.subject && !opts.dateFrom && !opts.dateTo && !opts.unreadOnly) {
         const rc = contract.invalidUsage({
@@ -435,6 +448,7 @@ async function main(argv) {
           process.exit(rc);
         }
       }
+      const previewChars = opts.withPreview != null ? Math.max(0, Math.min(2000, Number(opts.withPreview) || 0)) : 0;
       const result = await email.searchEmails({
         query: opts.query || "",
         from: opts.from || "",
@@ -446,6 +460,7 @@ async function main(argv) {
         offset: paging.offset,
         unread_only: Boolean(opts.unreadOnly),
         folder: opts.folder,
+        preview_chars: previewChars,
       });
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: _printEmailList });
       process.exit(rc);
@@ -453,33 +468,49 @@ async function main(argv) {
 
   emailCmd
     .command("show")
-    .description("Show email detail")
-    .argument("<email_id>")
+    .description("Show one or more emails (AI-friendly defaults: text only, body capped, URLs stripped — pass --full for raw)")
+    .argument("<email_ids...>")
     .option("--account-id <id>")
     .option("--folder <name>", "Folder", "INBOX")
-    .option("--preview", "Return a short body preview")
+    .option("--full", "Return full HTML + uncapped body + URLs (overrides AI-friendly defaults)")
+    .option("--preview", "Return a very short body preview (400 chars body, 2000 chars HTML)")
     .option("--body-max-len <n>", "Max body length (characters)")
     .option("--html-max-len <n>", "Max HTML length (characters)")
     .option("--no-html", "Exclude HTML body")
+    .option("--include-html", "Include HTML body (overrides AI default)")
     .option("--strip-urls", "Remove URLs from body text")
-    .action(async (emailId, opts) => {
+    .option("--keep-urls", "Keep URLs in body text (overrides AI default)")
+    .action(async (emailIds, opts) => {
       const bodyMaxRaw = opts.bodyMaxLen != null ? Number(opts.bodyMaxLen) : null;
       const htmlMaxRaw = opts.htmlMaxLen != null ? Number(opts.htmlMaxLen) : null;
-      let bodyMax = Number.isFinite(bodyMaxRaw) ? Math.max(0, bodyMaxRaw) : 0;
+      // AI-friendly defaults: text only, body ~ 2000 chars, URLs stripped.
+      // --full opts back to "give me everything" for human / debug use.
+      let bodyMax = Number.isFinite(bodyMaxRaw) ? Math.max(0, bodyMaxRaw) : (opts.full ? 0 : 2000);
       let htmlMax = Number.isFinite(htmlMaxRaw) ? Math.max(0, htmlMaxRaw) : 0;
+      let includeHtml = opts.full ? true : Boolean(opts.includeHtml);
+      if (opts.html === false) includeHtml = false; // explicit --no-html still wins
+      let stripUrls = opts.full ? false : !Boolean(opts.keepUrls);
+      if (opts.stripUrls) stripUrls = true;
       if (opts.preview) {
-        if (!bodyMax) bodyMax = 400;
-        if (!htmlMax && opts.html !== false) htmlMax = 2000;
+        bodyMax = 400;
+        if (!htmlMax && includeHtml) htmlMax = 2000;
       }
-      const result = await email.showEmail({
-        email_id: emailId,
+      const ids = Array.isArray(emailIds) ? emailIds : [emailIds];
+      const baseOpts = {
         folder: opts.folder,
         account_id: opts.accountId || "",
         body_max_len: bodyMax,
         html_max_len: htmlMax,
-        include_html: opts.html !== false,
-        strip_urls: Boolean(opts.stripUrls),
-      });
+        include_html: includeHtml,
+        strip_urls: stripUrls,
+      };
+      if (ids.length === 1) {
+        const result = await email.showEmail({ email_id: ids[0], ...baseOpts });
+        const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email show") });
+        process.exit(rc);
+      }
+      // Batch: reuse one IMAP connection across all IDs
+      const result = await email.showEmails({ email_ids: ids, ...baseOpts });
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email show") });
       process.exit(rc);
     });

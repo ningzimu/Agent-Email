@@ -114,7 +114,7 @@ function _parseDateInput(raw, { end = false } = {}) {
   return { date: d, sql };
 }
 
-async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOnly, since, before }) {
+async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOnly, since, before, previewChars = 0 }) {
   const openFolder = _normalizeFolder(folder);
   return withImapClient(account, async (client) => {
     const st = await client.mailboxOpen(openFolder);
@@ -126,6 +126,7 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
     const sorted = _uidsSortedDesc(uids);
     const slice = sorted.slice(offset, offset + limit);
 
+    const wantPreview = previewChars > 0 && slice.length > 0 && slice.length <= 50;
     const emails = [];
     for await (const msg of client.fetch(
       slice,
@@ -134,13 +135,14 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
         flags: true,
         internalDate: true,
         bodyStructure: true,
+        source: wantPreview,
       },
       { uid: true }
     )) {
       const env = msg.envelope || {};
       const flags = msg.flags || new Set([]);
       const unread = !flags.has("\\Seen");
-      emails.push({
+      const item = {
         id: String(msg.uid),
         uid: String(msg.uid),
         message_id: env.messageId || "",
@@ -153,7 +155,19 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
         account_id: account.id,
         folder: openFolder,
         source: "imap_fetch",
-      });
+      };
+      if (wantPreview && msg.source) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const parsed = await _safeParse(msg.source);
+          const txt = String(parsed.text || "").replace(/\s+/g, " ").trim();
+          item.preview = txt.slice(0, previewChars);
+          if (txt.length > previewChars) item.preview_truncated = true;
+        } catch {
+          item.preview = "";
+        }
+      }
+      emails.push(item);
     }
 
     return {
@@ -176,7 +190,11 @@ async function listEmails({
   use_cache = true,
   date_from = "",
   date_to = "",
+  preview_chars = 0,
 } = {}) {
+  const previewChars = Math.max(0, Number(preview_chars || 0));
+  // The cache backend returns envelope-only rows; preview requires live IMAP.
+  if (previewChars > 0) use_cache = false;
   const lim = Math.max(0, Number(limit || 0));
   const off = Math.max(0, Number(offset || 0));
   const unreadOnly = Boolean(unread_only);
@@ -228,7 +246,7 @@ async function listEmails({
   if (account_id) {
     const acc = accounts.getAccountByIdOrEmail(account_id);
     if (!acc.success) return acc;
-    const r = await _fetchEmailsForAccount({ account: acc.account, folder, limit: lim, offset: off, unreadOnly, since, before });
+    const r = await _fetchEmailsForAccount({ account: acc.account, folder, limit: lim, offset: off, unreadOnly, since, before, previewChars });
     if (!r.success) return r;
     results.push({ account: acc.account, ...r });
   } else {
@@ -263,6 +281,7 @@ async function listEmails({
           unreadOnly,
           since,
           before,
+          previewChars,
         });
         results.push({ account: acc, ...r });
       } catch (e) {
@@ -319,7 +338,8 @@ async function listEmails({
   };
 }
 
-async function searchEmails({ query, from = "", subject = "", account_id = "", date_from = "", date_to = "", limit = 50, offset = 0, unread_only = false, folder = "all" } = {}) {
+async function searchEmails({ query, from = "", subject = "", account_id = "", date_from = "", date_to = "", limit = 50, offset = 0, unread_only = false, folder = "all", preview_chars = 0 } = {}) {
+  const previewChars = Math.max(0, Number(preview_chars || 0));
   const q = String(query || "").trim();
   const fromQ = String(from || "").trim();
   const subjQ = String(subject || "").trim();
@@ -443,8 +463,11 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
 
       const sorted = _uidsSortedDesc(uids);
       // When we'll filter client-side we may need to fetch many to find a few.
-      // Cap at 5000 envelopes per folder to bound work.
-      const fetchCap = usedClientFilter ? Math.min(5000, sorted.length) : Math.min(perAccountFetchLimit, sorted.length);
+      // Cap at 5000 envelopes per folder to bound work. Lower the cap when
+      // preview is requested, because each fetch also pulls the message
+      // source — pulling 5000 full bodies would be huge and slow.
+      const clientCap = previewChars > 0 ? 500 : 5000;
+      const fetchCap = usedClientFilter ? Math.min(clientCap, sorted.length) : Math.min(perAccountFetchLimit, sorted.length);
       const slice = sorted.slice(0, fetchCap);
 
       const qLower = q.toLowerCase();
@@ -465,10 +488,11 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
 
       const emails = [];
       let matched = 0;
+      const wantPreview = previewChars > 0;
       if (slice.length > 0) {
         for await (const msg of client.fetch(
           slice,
-          { envelope: true, flags: true, internalDate: true, bodyStructure: true },
+          { envelope: true, flags: true, internalDate: true, bodyStructure: true, source: wantPreview },
           { uid: true }
         )) {
           const env = msg.envelope || {};
@@ -477,7 +501,7 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
           if (emails.length >= perAccountFetchLimit) continue;
           const flags = msg.flags || new Set([]);
           const unread = !flags.has("\\Seen");
-          emails.push({
+          const item = {
             id: String(msg.uid),
             uid: String(msg.uid),
             subject: env.subject || "",
@@ -493,7 +517,19 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
             account_id: acc.id,
             folder: folderPath,
             preview: "",
-          });
+          };
+          if (wantPreview && msg.source) {
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              const parsed = await _safeParse(msg.source);
+              const txt = String(parsed.text || "").replace(/\s+/g, " ").trim();
+              item.preview = txt.slice(0, previewChars);
+              if (txt.length > previewChars) item.preview_truncated = true;
+            } catch {
+              // ignore preview parse failures
+            }
+          }
+          emails.push(item);
         }
       }
       const totalReported = usedClientFilter ? matched : total;
@@ -722,6 +758,107 @@ async function showEmail({
       html_length: htmlText.length,
       body_truncated: bodyTruncated,
       html_truncated: htmlTruncated,
+    };
+  });
+}
+
+// Batch fetch multiple emails over a single IMAP connection. Same per-email
+// shape as showEmail (minus a few duplicated fields), wrapped in a list.
+async function showEmails({
+  email_ids,
+  folder = "INBOX",
+  account_id = "",
+  body_max_len = 0,
+  html_max_len = 0,
+  include_html = true,
+  strip_urls = false,
+} = {}) {
+  const ids = (email_ids || []).map((x) => String(x).trim()).filter(Boolean);
+  if (!ids.length) return { success: false, error: "Missing email_ids" };
+
+  const acc = accounts.getAccountByIdOrEmail(account_id);
+  if (!acc.success) return acc;
+
+  const openFolder = _normalizeFolder(folder);
+  const bodyMax = Math.max(0, Number(body_max_len || 0));
+  const htmlMax = Math.max(0, Number(html_max_len || 0));
+  const includeHtml = include_html !== false;
+
+  return withImapClient(acc.account, async (client) => {
+    await client.mailboxOpen(openFolder);
+    const emails = [];
+    const failed_ids = [];
+    for (const id of ids) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const msg = await client.fetchOne(
+          Number(id),
+          { envelope: true, flags: true, internalDate: true, bodyStructure: true, source: true },
+          { uid: true }
+        );
+        if (!msg) {
+          failed_ids.push({ id, error: "not_found" });
+          continue;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        const parsed = await _safeParse(msg.source);
+        const flags = msg.flags || new Set([]);
+        const attachments = (parsed.attachments || []).map((a) => ({
+          filename: a.filename || "",
+          size: a.size || 0,
+          content_type: a.contentType || "application/octet-stream",
+        }));
+        const bodyText = String(parsed.text || "");
+        const htmlText = typeof parsed.html === "string" ? parsed.html : "";
+        const bodyBase = strip_urls ? _stripUrls(bodyText) : bodyText;
+        let bodyOut = bodyBase;
+        let htmlOut = htmlText;
+        let bodyTruncated = false;
+        let htmlTruncated = false;
+        if (bodyMax > 0 && bodyOut.length > bodyMax) {
+          bodyOut = bodyOut.slice(0, bodyMax);
+          bodyTruncated = true;
+        }
+        if (includeHtml && htmlMax > 0 && htmlOut.length > htmlMax) {
+          htmlOut = htmlOut.slice(0, htmlMax);
+          htmlTruncated = true;
+        }
+        if (!includeHtml) htmlOut = "";
+        emails.push({
+          id: String(msg.uid),
+          from: parsed.from ? parsed.from.text || "" : firstAddress(msg.envelope && msg.envelope.from),
+          to: parsed.to ? parsed.to.text || "" : firstAddress(msg.envelope && msg.envelope.to),
+          cc: parsed.cc ? parsed.cc.text || "" : "",
+          subject: parsed.subject || (msg.envelope ? msg.envelope.subject : ""),
+          date: formatDateTime(parsed.date || msg.internalDate),
+          body: bodyOut,
+          html_body: htmlOut,
+          has_html: Boolean(parsed.html),
+          html_included: includeHtml,
+          body_url_stripped: Boolean(strip_urls),
+          attachments,
+          attachment_count: attachments.length,
+          unread: !flags.has("\\Seen"),
+          message_id: parsed.messageId || (msg.envelope ? msg.envelope.messageId : ""),
+          in_reply_to: parsed.inReplyTo || "",
+          references: Array.isArray(parsed.references) ? parsed.references.join(" ") : (parsed.references || ""),
+          body_length: bodyText.length,
+          html_length: htmlText.length,
+          body_truncated: bodyTruncated,
+          html_truncated: htmlTruncated,
+        });
+      } catch (e) {
+        failed_ids.push({ id, error: e && e.message ? e.message : "fetch failed" });
+      }
+    }
+    return {
+      success: failed_ids.length === 0,
+      emails,
+      failed_ids,
+      requested: ids.length,
+      returned: emails.length,
+      folder: openFolder,
+      account_id: acc.account.id,
     };
   });
 }
@@ -1268,6 +1405,7 @@ module.exports = {
   listEmails,
   searchEmails,
   showEmail,
+  showEmails,
   markEmails,
   deleteEmails,
   sendEmail,
