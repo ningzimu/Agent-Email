@@ -4,6 +4,7 @@ function parseGlobalFlags(argv) {
   const rest = [];
   let asJson = false;
   let pretty = false;
+  let forceText = false;
 
   for (const arg of argv) {
     if (arg === "--json") {
@@ -14,10 +15,14 @@ function parseGlobalFlags(argv) {
       pretty = true;
       continue;
     }
+    if (arg === "--text") {
+      forceText = true;
+      continue;
+    }
     rest.push(arg);
   }
 
-  return { asJson, pretty, argv: rest };
+  return { asJson, pretty, forceText, argv: rest };
 }
 
 function ensureSuccessField(result) {
