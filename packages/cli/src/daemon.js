@@ -50,7 +50,7 @@ function _resolveFn(fnName) {
   return fn.bind(obj);
 }
 
-async function startDaemon({ foreground = true, log = console.error } = {}) {
+async function startDaemon({ foreground = true, log = console.error, syncIntervalMs = 0, syncAccountId = "" } = {}) {
   const sockPath = getSocketPath();
   fs.mkdirSync(path.dirname(sockPath), { recursive: true });
 
@@ -66,8 +66,9 @@ async function startDaemon({ foreground = true, log = console.error } = {}) {
   const pool = new ImapPool();
   core.imap.setGlobalPool(pool);
   const startedAt = Date.now();
+  const stats = { syncs_attempted: 0, syncs_ok: 0, syncs_failed: 0, last_sync_at: null, last_sync_error: null };
 
-  const server = net.createServer((conn) => _handleConn(conn, { pool, startedAt, log }));
+  const server = net.createServer((conn) => _handleConn(conn, { pool, startedAt, log, stats }));
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(sockPath, () => {
@@ -78,8 +79,35 @@ async function startDaemon({ foreground = true, log = console.error } = {}) {
 
   fs.writeFileSync(getPidFilePath(), String(process.pid), { mode: 0o600 });
 
+  // Background sync loop. Runs in-process so it shares the same pooled
+  // IMAP connections as RPC traffic — no extra TCP handshakes for the
+  // periodic refresh. AI clients hitting `email list` (without --live)
+  // then read from the local SQLite cache instead of doing IMAP at all.
+  let syncTimer = null;
+  if (syncIntervalMs > 0) {
+    const runSync = async () => {
+      stats.syncs_attempted += 1;
+      try {
+        const r = await core.sync.force({ account_id: syncAccountId || "", full: false });
+        if (r && r.success === false) throw new Error(r.error || "sync failed");
+        stats.syncs_ok += 1;
+        stats.last_sync_at = new Date().toISOString();
+        stats.last_sync_error = null;
+      } catch (e) {
+        stats.syncs_failed += 1;
+        stats.last_sync_error = (e && e.message) || String(e);
+      }
+    };
+    // First sync after a short delay so we don't block startup.
+    setTimeout(() => { runSync(); }, 5_000);
+    syncTimer = setInterval(runSync, syncIntervalMs);
+    if (typeof syncTimer.unref === "function") syncTimer.unref();
+    log(`[mailbox daemon] background sync every ${Math.round(syncIntervalMs / 1000)}s${syncAccountId ? ` (account ${syncAccountId})` : ""}`);
+  }
+
   const cleanup = async () => {
     log(`[mailbox daemon] shutting down (pid=${process.pid})`);
+    if (syncTimer) clearInterval(syncTimer);
     try { await pool.closeAll(); } catch { /* ignore */ }
     try { server.close(); } catch { /* ignore */ }
     try { fs.unlinkSync(sockPath); } catch { /* ignore */ }
@@ -90,7 +118,7 @@ async function startDaemon({ foreground = true, log = console.error } = {}) {
   process.once("SIGTERM", cleanup);
 
   log(`[mailbox daemon] listening on ${sockPath} (pid=${process.pid})`);
-  return { server, pool, sockPath };
+  return { server, pool, sockPath, stats };
 }
 
 function _handleConn(conn, ctx) {
@@ -123,6 +151,7 @@ async function _dispatch(line, conn, ctx) {
       pid: process.pid,
       uptime_ms: Date.now() - ctx.startedAt,
       pool: ctx.pool.stats(),
+      sync: ctx.stats || null,
     } });
   }
   if (fnName === "__reload") {
@@ -168,4 +197,151 @@ async function _probe(sockPath) {
   });
 }
 
-module.exports = { startDaemon, getSocketPath, getPidFilePath };
+// ---------- autostart (launchd / systemd-user) ----------
+
+const LAUNCHD_LABEL = "com.leeguoo.mailbox.daemon";
+const SYSTEMD_UNIT = "mailbox-daemon.service";
+
+function _resolveCliExecutable() {
+  // Returns { node, script } — node binary (absolute) and the .js entry
+  // point (absolute, may not be marked executable so launchd needs to
+  // invoke it via node explicitly).
+  const argv1 = process.argv[1] || "";
+  const node = process.execPath || "node";
+  if (argv1 && fs.existsSync(argv1)) return { node, script: argv1 };
+  return { node, script: "mailbox" };
+}
+
+function _autostartPaths() {
+  if (process.platform === "darwin") {
+    return {
+      kind: "launchd",
+      unitPath: path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`),
+      logPath: path.join(os.homedir(), "Library", "Logs", "mailbox-daemon.log"),
+    };
+  }
+  if (process.platform === "linux") {
+    const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+    return {
+      kind: "systemd",
+      unitPath: path.join(xdg, "systemd", "user", SYSTEMD_UNIT),
+      logPath: "",
+    };
+  }
+  return { kind: "unsupported", unitPath: "", logPath: "" };
+}
+
+function _renderLaunchdPlist({ node, script, syncIntervalSec, logPath }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${node}</string>
+    <string>${script}</string>
+    <string>daemon</string>
+    <string>start</string>
+    <string>--sync-interval</string><string>${syncIntervalSec}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${logPath}</string>
+  <key>StandardErrorPath</key><string>${logPath}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
+`;
+}
+
+function _renderSystemdUnit({ node, script, syncIntervalSec }) {
+  return `[Unit]
+Description=Mailbox CLI persistent IMAP daemon
+After=network-online.target
+
+[Service]
+ExecStart=${node} ${script} daemon start --sync-interval ${syncIntervalSec}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+async function installAutostart({ syncIntervalSec = 300 } = {}) {
+  const info = _autostartPaths();
+  if (info.kind === "unsupported") {
+    return { success: false, error: `autostart not supported on platform ${process.platform}`, error_code: "unsupported" };
+  }
+  const { node, script } = _resolveCliExecutable();
+  fs.mkdirSync(path.dirname(info.unitPath), { recursive: true });
+
+  if (info.kind === "launchd") {
+    fs.mkdirSync(path.dirname(info.logPath), { recursive: true });
+    const body = _renderLaunchdPlist({ node, script, syncIntervalSec, logPath: info.logPath });
+    fs.writeFileSync(info.unitPath, body, { mode: 0o644 });
+    // Best-effort load. User may need to do it manually if SIP-locked.
+    let activate = "";
+    try {
+      const { execFileSync } = require("child_process");
+      execFileSync("launchctl", ["unload", info.unitPath], { stdio: "ignore" });
+    } catch { /* not previously loaded — fine */ }
+    try {
+      const { execFileSync } = require("child_process");
+      execFileSync("launchctl", ["load", "-w", info.unitPath], { stdio: "ignore" });
+      activate = `launchctl loaded — daemon will start now and at every login. Logs: ${info.logPath}`;
+    } catch (e) {
+      activate = `wrote plist; load it manually: launchctl load -w ${info.unitPath}`;
+    }
+    return { success: true, unit_path: info.unitPath, log_path: info.logPath, exe: `${node} ${script}`, sync_interval_sec: syncIntervalSec, activate_hint: activate };
+  }
+
+  if (info.kind === "systemd") {
+    const body = _renderSystemdUnit({ node, script, syncIntervalSec });
+    fs.writeFileSync(info.unitPath, body, { mode: 0o644 });
+    let activate = `systemctl --user daemon-reload && systemctl --user enable --now ${SYSTEMD_UNIT}`;
+    try {
+      const { execFileSync } = require("child_process");
+      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
+      execFileSync("systemctl", ["--user", "enable", "--now", SYSTEMD_UNIT], { stdio: "ignore" });
+      activate = `systemd unit enabled and started`;
+    } catch { /* leave activate as the manual instruction */ }
+    return { success: true, unit_path: info.unitPath, exe: `${node} ${script}`, sync_interval_sec: syncIntervalSec, activate_hint: activate };
+  }
+
+  return { success: false, error: "unknown autostart kind", error_code: "operation_failed" };
+}
+
+async function uninstallAutostart() {
+  const info = _autostartPaths();
+  if (info.kind === "unsupported") {
+    return { success: false, error: `autostart not supported on platform ${process.platform}`, error_code: "unsupported" };
+  }
+  if (!fs.existsSync(info.unitPath)) {
+    return { success: true, unit_path: "" };
+  }
+  if (info.kind === "launchd") {
+    try {
+      const { execFileSync } = require("child_process");
+      execFileSync("launchctl", ["unload", info.unitPath], { stdio: "ignore" });
+    } catch { /* ignore */ }
+  } else if (info.kind === "systemd") {
+    try {
+      const { execFileSync } = require("child_process");
+      execFileSync("systemctl", ["--user", "disable", "--now", SYSTEMD_UNIT], { stdio: "ignore" });
+    } catch { /* ignore */ }
+  }
+  try { fs.unlinkSync(info.unitPath); } catch { /* ignore */ }
+  return { success: true, unit_path: info.unitPath };
+}
+
+module.exports = {
+  startDaemon, getSocketPath, getPidFilePath,
+  installAutostart, uninstallAutostart,
+};

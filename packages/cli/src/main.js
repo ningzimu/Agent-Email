@@ -1157,10 +1157,17 @@ async function main(argv) {
   daemonCmd
     .command("start")
     .description("Start the daemon in the foreground (run with nohup/launchd/systemd to detach)")
-    .action(async () => {
-      const { startDaemon, getSocketPath } = require("./daemon");
+    .option("--sync-interval <seconds>", "Run a background sync this often (0 disables)", "300")
+    .option("--sync-account-id <id>", "Restrict background sync to one account")
+    .action(async (opts) => {
+      const { startDaemon } = require("./daemon");
       try {
-        await startDaemon({ foreground: true });
+        const syncIntervalSec = Math.max(0, Number(opts.syncInterval || 0));
+        await startDaemon({
+          foreground: true,
+          syncIntervalMs: syncIntervalSec * 1000,
+          syncAccountId: opts.syncAccountId || "",
+        });
         // Block forever until SIGINT/SIGTERM
         await new Promise(() => {});
       } catch (e) {
@@ -1168,6 +1175,31 @@ async function main(argv) {
         const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => process.stderr.write(result.error + "\n") });
         process.exit(rc);
       }
+    });
+  daemonCmd
+    .command("install")
+    .description("Install a launchd LaunchAgent (macOS) or systemd user unit (Linux) to autostart the daemon at login")
+    .option("--sync-interval <seconds>", "Background sync interval", "300")
+    .action(async (opts) => {
+      const { installAutostart } = require("./daemon");
+      const result = await installAutostart({ syncIntervalSec: Number(opts.syncInterval || 300) });
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: (r) => {
+        if (r.success) process.stdout.write(`installed: ${r.unit_path}\n  next: ${r.activate_hint || "(start it now with: mailbox daemon start)"}\n`);
+        else process.stderr.write((r.error || "install failed") + "\n");
+      } });
+      process.exit(rc);
+    });
+  daemonCmd
+    .command("uninstall")
+    .description("Remove the autostart unit and stop the daemon")
+    .action(async () => {
+      const { uninstallAutostart } = require("./daemon");
+      const result = await uninstallAutostart();
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: (r) => {
+        if (r.success) process.stdout.write(`uninstalled: ${r.unit_path || "(no unit found)"}\n`);
+        else process.stderr.write((r.error || "uninstall failed") + "\n");
+      } });
+      process.exit(rc);
     });
   daemonCmd
     .command("status")

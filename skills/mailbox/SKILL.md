@@ -22,20 +22,28 @@ outputs and optional text summaries.
 - `mailbox monitor run --json`
 - `mailbox inbox --limit 15 --text`
 
-## Persistent daemon (4-6× faster IMAP calls)
+## Persistent daemon (5-30× faster CLI calls)
 
 Each one-shot CLI invocation otherwise spends 1-3s on TCP+TLS+IMAP LOGIN.
-Run a daemon once and every subsequent CLI call reuses pooled connections:
+Run a daemon once and every subsequent CLI call reuses pooled connections.
+The daemon also runs a background SQLite sync every 5 minutes by default,
+so `email list` (without `--live`) usually doesn't touch IMAP at all.
 
 ```bash
-# Start (foreground; use nohup / launchd / systemd to detach):
-mailbox daemon start
+# One-time setup: install + autostart at login (macOS launchd / Linux systemd-user):
+mailbox daemon install         # writes the unit file and loads it
+mailbox daemon uninstall       # remove
 
-# Inspect:
-mailbox daemon status --json    # pid, uptime, per-account pool state
-mailbox daemon reload           # drop pooled connections (after editing auth.json)
+# Manual lifecycle (no autostart):
+mailbox daemon start           # foreground; use nohup / launchd / systemd to detach
+mailbox daemon status --json   # pid, uptime, per-account pool state, sync stats
+mailbox daemon reload          # drop pooled connections (after editing auth.json)
 mailbox daemon stop
 ```
+
+Daemon flags:
+- `--sync-interval <seconds>` — background sync cadence (default 300, 0 disables)
+- `--sync-account-id <id>` — restrict background sync to one account
 
 Once running, every other `mailbox …` call automatically routes through
 the daemon's Unix socket. If the socket is missing or unreachable, the
@@ -46,10 +54,15 @@ Socket path: `${XDG_RUNTIME_DIR}/mailbox-{uid}.sock` or
 `~/.cache/mailbox/daemon-{uid}.sock`. Override with
 `MAILBOX_DAEMON_SOCKET=/path`.
 
-Typical speedup measured against Gmail INBOX:
-- `email folders`: 5.0s → 0.85s (5.9×)
-- `email list --live`: 5.0s → 1.0s (5×)
-- `5 × folder list back-to-back`: 17.6s → 4.0s (4.4×)
+Measured speedup (Gmail INBOX, M2 MacBook over residential WAN):
+
+| Operation | No daemon | Daemon, --live | Daemon, cached |
+|---|---|---|---|
+| Single `email list` | 5.0s | 1.0s | 0.17s |
+| `email folders` | 5.0s | 0.85s | n/a |
+| 5 sequential `email list` | 25s | 5.3s | **0.83s** |
+
+Per-call speedup vs baseline: **~5× live, ~30× cached.**
 
 ## Token-saving tips for AI agents
 - Add `--lean` (global, before subcommand) to strip noisy/duplicate fields: `mailbox --lean email search ...` — typically ~30% smaller responses.
