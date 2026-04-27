@@ -3,8 +3,12 @@ const path = require("path");
 const { Command } = require("commander");
 
 const { contract } = require("@mailbox/shared");
-const { accounts, email, imap, smtp, sync } = require("@mailbox/core");
-const { digest, monitor, inbox } = require("@mailbox/workflows");
+const { makeProxies } = require("./core_client");
+// All calls into core/workflows go through these proxies. When a mailbox
+// daemon is running, requests are forwarded over a Unix socket so we
+// reuse pooled IMAP connections (1-3s saved per call). When no daemon
+// is around, the proxy falls back transparently to in-process execution.
+const { accounts, email, imap, smtp, sync, digest, monitor, inbox } = makeProxies();
 
 function _printTextNotImplemented(label) {
   // Goes to stderr so it never corrupts a JSON pipe consumer.
@@ -314,6 +318,44 @@ function _resolveCliVersion() {
   }
 
   return "0.0.0";
+}
+
+// Send an admin RPC (__ping/__reload/__shutdown) directly to the daemon
+// socket without going through the makeProxies fallback path — these
+// methods only make sense when a daemon is actually listening.
+async function _daemonAdmin(fnName) {
+  const net = require("net");
+  const fsLocal = require("fs");
+  const { getSocketPath } = require("./daemon");
+  const sockPath = getSocketPath();
+  if (!fsLocal.existsSync(sockPath)) {
+    return { success: false, error: `daemon socket not found at ${sockPath}`, error_code: "not_running" };
+  }
+  return new Promise((resolve) => {
+    const conn = net.createConnection(sockPath);
+    let buf = "";
+    let settled = false;
+    const settle = (val) => { if (settled) return; settled = true; try { conn.end(); } catch {} resolve(val); };
+    conn.setEncoding("utf8");
+    conn.on("data", (chunk) => {
+      buf += chunk;
+      const idx = buf.indexOf("\n");
+      if (idx < 0) return;
+      const line = buf.slice(0, idx);
+      try {
+        const msg = JSON.parse(line);
+        if (msg.ok) settle({ success: true, ...(msg.result || {}) });
+        else settle({ success: false, error: msg.error || "daemon error", error_code: msg.error_code });
+      } catch (e) {
+        settle({ success: false, error: `invalid daemon response: ${e.message}`, error_code: "operation_failed" });
+      }
+    });
+    conn.on("error", (e) => settle({ success: false, error: e.message, error_code: "network_error" }));
+    conn.on("connect", () => {
+      conn.write(JSON.stringify({ id: 1, fn: fnName }) + "\n");
+    });
+    setTimeout(() => settle({ success: false, error: "daemon did not respond within 2s", error_code: "network_error" }), 2000);
+  });
 }
 
 // Recursively serialize a commander Command into a JSON descriptor that an
@@ -1107,6 +1149,52 @@ async function main(argv) {
     .action((component) => {
       const result = monitor.test({ component });
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("monitor test") });
+      process.exit(rc);
+    });
+
+  // daemon
+  const daemonCmd = program.command("daemon").description("Persistent IMAP daemon (reuses connections across CLI calls)");
+  daemonCmd
+    .command("start")
+    .description("Start the daemon in the foreground (run with nohup/launchd/systemd to detach)")
+    .action(async () => {
+      const { startDaemon, getSocketPath } = require("./daemon");
+      try {
+        await startDaemon({ foreground: true });
+        // Block forever until SIGINT/SIGTERM
+        await new Promise(() => {});
+      } catch (e) {
+        const result = { success: false, error: (e && e.message) || "daemon failed", error_code: e && e.code === "EADDRINUSE" ? "already_running" : "operation_failed" };
+        const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => process.stderr.write(result.error + "\n") });
+        process.exit(rc);
+      }
+    });
+  daemonCmd
+    .command("status")
+    .description("Probe the daemon and report version + pool stats")
+    .action(async () => {
+      const result = await _daemonAdmin("__ping");
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: (r) => {
+        if (!r.success) { process.stderr.write((r.error || "not running") + "\n"); return; }
+        process.stdout.write(`daemon pid=${r.pid} uptime_ms=${r.uptime_ms}\n`);
+        for (const p of r.pool || []) process.stdout.write(`  ${p.account_id}: ${p.connected ? "connected" : "idle"} (last_used_ms_ago=${p.last_used_ms_ago})\n`);
+      } });
+      process.exit(rc);
+    });
+  daemonCmd
+    .command("stop")
+    .description("Ask the daemon to shut down cleanly")
+    .action(async () => {
+      const result = await _daemonAdmin("__shutdown");
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => process.stdout.write("daemon stopped\n") });
+      process.exit(rc);
+    });
+  daemonCmd
+    .command("reload")
+    .description("Drop pooled IMAP connections (e.g. after editing auth.json)")
+    .action(async () => {
+      const result = await _daemonAdmin("__reload");
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => process.stdout.write("daemon reloaded\n") });
       process.exit(rc);
     });
 

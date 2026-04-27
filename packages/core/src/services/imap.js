@@ -6,11 +6,21 @@ function _allowInsecureTls() {
   return String(process.env.MAILBOX_ALLOW_INSECURE_TLS || "").trim() === "1";
 }
 
+// Optional persistent connection pool. The mailbox daemon installs one
+// here at startup; everything else (one-shot CLI, tests) leaves it null
+// and gets the original "open + use + logout" behavior.
+let _GLOBAL_POOL = null;
+function setGlobalPool(pool) { _GLOBAL_POOL = pool; }
+function getGlobalPool() { return _GLOBAL_POOL; }
+
 async function withImapClient(account, fn) {
   if (_isTestMode()) {
     const { createMockImapClient } = require("../testing/mock_imap_client");
     const client = createMockImapClient(account);
     return fn(client);
+  }
+  if (_GLOBAL_POOL) {
+    return _GLOBAL_POOL.withClient(account, fn);
   }
 
   const { ImapFlow } = require("imapflow");
@@ -70,4 +80,6 @@ async function testConnection(account, folder) {
 module.exports = {
   withImapClient,
   testConnection,
+  setGlobalPool,
+  getGlobalPool,
 };

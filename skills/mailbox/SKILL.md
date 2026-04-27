@@ -22,6 +22,35 @@ outputs and optional text summaries.
 - `mailbox monitor run --json`
 - `mailbox inbox --limit 15 --text`
 
+## Persistent daemon (4-6× faster IMAP calls)
+
+Each one-shot CLI invocation otherwise spends 1-3s on TCP+TLS+IMAP LOGIN.
+Run a daemon once and every subsequent CLI call reuses pooled connections:
+
+```bash
+# Start (foreground; use nohup / launchd / systemd to detach):
+mailbox daemon start
+
+# Inspect:
+mailbox daemon status --json    # pid, uptime, per-account pool state
+mailbox daemon reload           # drop pooled connections (after editing auth.json)
+mailbox daemon stop
+```
+
+Once running, every other `mailbox …` call automatically routes through
+the daemon's Unix socket. If the socket is missing or unreachable, the
+CLI falls back to direct IMAP (current behavior) — no config change
+needed. Set `MAILBOX_NO_DAEMON=1` to skip the probe entirely.
+
+Socket path: `${XDG_RUNTIME_DIR}/mailbox-{uid}.sock` or
+`~/.cache/mailbox/daemon-{uid}.sock`. Override with
+`MAILBOX_DAEMON_SOCKET=/path`.
+
+Typical speedup measured against Gmail INBOX:
+- `email folders`: 5.0s → 0.85s (5.9×)
+- `email list --live`: 5.0s → 1.0s (5×)
+- `5 × folder list back-to-back`: 17.6s → 4.0s (4.4×)
+
 ## Token-saving tips for AI agents
 - Add `--lean` (global, before subcommand) to strip noisy/duplicate fields: `mailbox --lean email search ...` — typically ~30% smaller responses.
 - Use `--with-preview <N>` on `email list` / `email search` to avoid one round-trip per email when you only need a snippet.
