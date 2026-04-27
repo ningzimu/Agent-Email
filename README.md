@@ -24,6 +24,25 @@ mailbox --help
 
 The npm package ships prebuilt binaries per platform (no Python required).
 
+### As an AI Skill (Claude Code / Cursor / etc.)
+
+```bash
+# Project scope — installs into ./.claude/skills/mailbox (or ./.cursor/skills/...):
+npx skills add leeguooooo/Mailbox --skill mailbox
+
+# User scope — installs into ~/.claude/skills/mailbox:
+npx skills add leeguooooo/Mailbox --skill mailbox -g
+```
+
+The skill assumes the CLI is on `PATH` (`npm install -g @leeguoo/mailbox-cli`).
+For the biggest speedup also run `mailbox daemon install` once.
+
+### MCP server (Claude Desktop / Code / Cursor)
+
+```bash
+mailbox mcp config --json   # prints a paste-ready mcpServers entry
+```
+
 ### From source (development)
 
 ```bash

@@ -1406,11 +1406,136 @@ async function moveEmails({ email_ids, target_folder, source_folder = "INBOX", a
   });
 }
 
+// Watch a folder for new mail using IMAP IDLE. Long-running. Calls
+// onEvent({type, email}) for every newly-arriving message that matches
+// the optional filter. Resolves when stop() (returned from this fn)
+// is invoked or the connection dies fatally.
+//
+// Note: this opens its own ImapFlow connection (not pooled) — IDLE
+// holds the connection mostly-idle and re-issuing IDLE on every
+// pooled-acquire would defeat the purpose.
+async function watchFolder({ account_id, folder = "INBOX", filter = {}, onEvent } = {}) {
+  const acc = accounts.getAccountByIdOrEmail(account_id);
+  if (!acc.success) return { success: false, error: acc.error || "account lookup failed", error_code: "account_not_found" };
+  const openFolder = _normalizeFolder(folder);
+
+  const fromQ = String(filter.from || "").toLowerCase();
+  const subjQ = String(filter.subject || "").toLowerCase();
+  const matches = (env) => {
+    if (fromQ) {
+      const f = (firstAddress(env.from) || "").toLowerCase();
+      if (!f.includes(fromQ)) return false;
+    }
+    if (subjQ) {
+      const s = String(env.subject || "").toLowerCase();
+      if (!s.includes(subjQ)) return false;
+    }
+    return true;
+  };
+
+  const { ImapFlow } = require("imapflow");
+  const port = Number(acc.account.imap.port);
+  const secure = Boolean(acc.account.imap.secure);
+  const client = new ImapFlow({
+    host: acc.account.imap.host,
+    port,
+    secure,
+    requireTLS: !secure,
+    auth: { user: acc.account.email, pass: acc.account.password },
+    tls: { rejectUnauthorized: !(String(process.env.MAILBOX_ALLOW_INSECURE_TLS || "").trim() === "1"), minVersion: "TLSv1.2" },
+    logger: false,
+  });
+
+  let stopped = false;
+  let resolveDone;
+  const done = new Promise((r) => (resolveDone = r));
+
+  await client.connect();
+  await client.mailboxOpen(openFolder);
+  let lastUid = client.mailbox && client.mailbox.uidNext ? Number(client.mailbox.uidNext) : 0;
+
+  const fetchSince = async () => {
+    if (!lastUid) return;
+    try {
+      const since = `${lastUid}:*`;
+      for await (const msg of client.fetch(
+        since,
+        { envelope: true, flags: true, internalDate: true, bodyStructure: true },
+        { uid: true }
+      )) {
+        const env = msg.envelope || {};
+        if (!matches(env)) continue;
+        const flags = msg.flags || new Set([]);
+        if (Number(msg.uid) < lastUid) continue; // duplicate from `:*` semantics
+        const item = {
+          id: String(msg.uid),
+          uid: String(msg.uid),
+          gid: `${acc.account.id}:${msg.uid}`,
+          message_id: env.messageId || "",
+          subject: env.subject || "",
+          from: firstAddress(env.from),
+          date: formatDateTime(msg.internalDate || env.date),
+          unread: !flags.has("\\Seen"),
+          has_attachments: hasAttachmentsFromBodyStructure(msg.bodyStructure),
+          account: acc.account.email,
+          account_id: acc.account.id,
+          folder: openFolder,
+          source: "imap_idle",
+        };
+        if (typeof onEvent === "function") {
+          try { onEvent({ type: "new_email", email: item }); } catch { /* ignore */ }
+        }
+        lastUid = Number(msg.uid) + 1;
+      }
+    } catch (e) {
+      if (typeof onEvent === "function") {
+        try { onEvent({ type: "fetch_error", error: e && e.message ? e.message : String(e) }); } catch { /* ignore */ }
+      }
+    }
+  };
+
+  client.on("exists", () => { fetchSince(); });
+  client.on("close", () => {
+    if (!stopped && typeof onEvent === "function") {
+      try { onEvent({ type: "disconnected" }); } catch { /* ignore */ }
+    }
+    stopped = true;
+    resolveDone({ success: true, stopped: true });
+  });
+
+  // Kick off the IDLE loop. ImapFlow re-issues IDLE internally roughly
+  // every 28 minutes; we don't have to wrap it.
+  (async () => {
+    while (!stopped) {
+      try {
+        await client.idle();
+      } catch (e) {
+        if (stopped) break;
+        if (typeof onEvent === "function") {
+          try { onEvent({ type: "idle_error", error: e && e.message ? e.message : String(e) }); } catch { /* ignore */ }
+        }
+        // Brief backoff before re-issuing IDLE.
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+  })();
+
+  const stop = async () => {
+    if (stopped) return;
+    stopped = true;
+    try { await client.logout(); } catch { /* ignore */ }
+    resolveDone({ success: true, stopped: true });
+  };
+
+  return { success: true, watching: true, folder: openFolder, account_id: acc.account.id, stop, done };
+}
+
 module.exports = {
   listEmails,
   searchEmails,
   showEmail,
   showEmails,
+  watchFolder,
   markEmails,
   deleteEmails,
   sendEmail,
