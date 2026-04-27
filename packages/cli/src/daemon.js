@@ -136,27 +136,32 @@ async function startDaemon({ foreground = true, log = console.error, syncInterva
   return { server, pool, sockPath, stats };
 }
 
-// Hard cap on a single JSON-RPC line so a misbehaving (or hostile) local
-// client can't grow our recv buffer until OOM. 1 MiB is plenty for any
-// legitimate request — even sending an email body via RPC fits.
+// Hard cap on a single JSON-RPC line, measured in bytes. 1 MiB is plenty
+// for any legitimate request (even RPC'd email bodies) and stops a
+// misbehaving local client from growing our recv buffer until OOM.
 const MAX_LINE_BYTES = Number(process.env.MAILBOX_DAEMON_MAX_LINE_BYTES || 1 * 1024 * 1024);
 
 function _handleConn(conn, ctx) {
-  let buffer = "";
-  conn.setEncoding("utf8");
+  // We accumulate raw Buffers (not decoded strings) so the size cap is
+  // measured in real bytes — `setEncoding("utf8")` would make chunk.length
+  // a UTF-16 unit count and let multi-byte payloads overflow the
+  // advertised limit. We also reject BEFORE concatenating, so a single
+  // oversized chunk can't slip past the check.
+  let buffer = Buffer.alloc(0);
   conn.on("data", (chunk) => {
-    buffer += chunk;
-    if (buffer.length > MAX_LINE_BYTES) {
+    if (chunk.length + buffer.length > MAX_LINE_BYTES) {
       try {
         conn.write(JSON.stringify({ id: null, ok: false, error: `request exceeds MAILBOX_DAEMON_MAX_LINE_BYTES=${MAX_LINE_BYTES}`, error_code: "size_limit" }) + "\n");
       } catch { /* ignore */ }
       try { conn.destroy(); } catch { /* ignore */ }
-      buffer = "";
+      buffer = Buffer.alloc(0);
       return;
     }
-    let idx;
-    while ((idx = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, idx);
+    buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+    while (true) {
+      const idx = buffer.indexOf(0x0a); // '\n'
+      if (idx < 0) break;
+      const line = buffer.slice(0, idx).toString("utf8");
       buffer = buffer.slice(idx + 1);
       if (!line.trim()) continue;
       _dispatch(line, conn, ctx).catch((e) => ctx.log(`[mailbox daemon] dispatch error: ${e}`));

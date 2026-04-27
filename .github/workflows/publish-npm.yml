@@ -150,7 +150,7 @@ jobs:
               rm -f "$logfile"; return 0
             fi
             local rc=${PIPESTATUS[0]}
-            if grep -qE "EPUBLISHCONFLICT|cannot publish over.*previously published|You cannot publish over" "$logfile"; then
+            if grep -qE "EPUBLISHCONFLICT|You cannot publish over the previously published versions?|cannot publish over the previously published versions?" "$logfile"; then
               echo "already published, skipping (saw EPUBLISHCONFLICT)"
               rm -f "$logfile"; return 0
             fi
@@ -171,7 +171,7 @@ jobs:
             rm -f "$logfile"; exit 0
           fi
           rc=${PIPESTATUS[0]}
-          if grep -qE "EPUBLISHCONFLICT|cannot publish over.*previously published|You cannot publish over" "$logfile"; then
+          if grep -qE "EPUBLISHCONFLICT|You cannot publish over the previously published versions?|cannot publish over the previously published versions?" "$logfile"; then
             echo "launcher already published, skipping"
             rm -f "$logfile"; exit 0
           fi
