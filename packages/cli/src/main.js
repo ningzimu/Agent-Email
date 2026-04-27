@@ -1230,6 +1230,46 @@ async function main(argv) {
       process.exit(rc);
     });
 
+  // mcp
+  const mcpCmd = program.command("mcp").description("Model Context Protocol server (for Claude Desktop / Code / Cursor / etc.)");
+  mcpCmd
+    .command("serve")
+    .description("Run the MCP server over stdio. Configure your AI client to spawn this command.")
+    .action(async () => {
+      const { startStdioServer } = require("./mcp_server");
+      try {
+        await startStdioServer();
+        // Stdio transport keeps reading from stdin; we have to block here so
+        // the Node process doesn't exit and tear down the transport.
+        await new Promise((resolve) => {
+          process.stdin.on("end", resolve);
+          process.stdin.on("close", resolve);
+          process.on("SIGINT", resolve);
+          process.on("SIGTERM", resolve);
+        });
+        process.exit(0);
+      } catch (e) {
+        process.stderr.write(`mcp server failed: ${e && e.message}\n`);
+        process.exit(1);
+      }
+    });
+  mcpCmd
+    .command("config")
+    .description("Print a sample MCP client config snippet for Claude Desktop / Code")
+    .action(() => {
+      const cfg = {
+        mcpServers: {
+          mailbox: {
+            command: process.execPath,
+            args: [process.argv[1] || "mailbox", "mcp", "serve"],
+          },
+        },
+      };
+      const result = { success: true, config: cfg, hint: "Add the mcpServers entry to your client's config (e.g. ~/Library/Application Support/Claude/claude_desktop_config.json on macOS)" };
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => process.stdout.write(JSON.stringify(cfg, null, 2) + "\n") });
+      process.exit(rc);
+    });
+
   // inbox
   program
     .command("inbox")

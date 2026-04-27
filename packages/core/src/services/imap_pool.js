@@ -1,15 +1,16 @@
 // Per-account persistent ImapFlow connection pool. Lives in a long-running
-// process (the mailbox daemon). Sends NOOP every 25 minutes so the server's
-// ~30 minute idle disconnect doesn't kick us off, reconnects transparently
-// when the underlying socket dies.
-//
-// One client per account; per-account async mutex serializes mailbox switches
-// so two requests on the same account don't fight over the selected folder.
+// process (the mailbox daemon). Each account gets up to MAX_CLIENTS_PER_ACCOUNT
+// long-lived connections (default 3); concurrent requests on the same
+// account run on different clients in parallel instead of serializing
+// behind a mutex. Each client sends NOOP every 25 minutes so the server's
+// ~30 minute idle disconnect doesn't kick us off, and reconnects
+// transparently when the underlying socket dies.
 
 const { ImapFlow } = require("imapflow");
 
 const KEEPALIVE_MS = 25 * 60 * 1000; // 25 minutes
 const CONNECT_TIMEOUT_MS = 30 * 1000;
+const MAX_CLIENTS_PER_ACCOUNT = Math.max(1, Number(process.env.MAILBOX_POOL_MAX || 3));
 
 function _allowInsecureTls() {
   return String(process.env.MAILBOX_ALLOW_INSECURE_TLS || "").trim() === "1";
@@ -29,113 +30,163 @@ function _buildClient(account) {
   });
 }
 
-class ImapPool {
-  constructor() {
-    // accountId → { client, lastUsed, keepaliveTimer, mutex: Promise }
-    this._entries = new Map();
+class AccountPool {
+  constructor(account, maxSize) {
+    this.account = account;
+    this.maxSize = maxSize;
+    // Each entry: { client, inUse, keepalive, lastUsed }
+    this.entries = [];
+    // Resolver queue for callers waiting for a free client.
+    this.waiters = [];
   }
 
-  // Internal mutex helper: each account gets a serialized chain of work.
-  async _withMutex(accountId, fn) {
-    const prev = this._entries.get(accountId)?.mutex || Promise.resolve();
-    let release;
-    const next = new Promise((res) => (release = res));
-    if (this._entries.get(accountId)) this._entries.get(accountId).mutex = next;
-    try {
-      await prev;
-      return await fn();
-    } finally {
-      release();
+  async acquire() {
+    // 1. Reuse a free, usable client.
+    for (const e of this.entries) {
+      if (!e.inUse && e.client && e.client.usable) {
+        e.inUse = true;
+        e.lastUsed = Date.now();
+        return e;
+      }
+    }
+    // 2. Drop dead entries so we don't hit maxSize falsely.
+    this.entries = this.entries.filter((e) => e.client && e.client.usable);
+    // 3. Build a new client if there's room.
+    if (this.entries.length < this.maxSize) {
+      const e = await this._build();
+      e.inUse = true;
+      e.lastUsed = Date.now();
+      this.entries.push(e);
+      return e;
+    }
+    // 4. Wait for someone to release.
+    return new Promise((resolve) => this.waiters.push(resolve));
+  }
+
+  release(entry) {
+    entry.inUse = false;
+    const next = this.waiters.shift();
+    if (next) {
+      // If the client died while waiters were queued, build/find a fresh one
+      // before handing off.
+      if (entry.client && entry.client.usable) {
+        entry.inUse = true;
+        entry.lastUsed = Date.now();
+        next(entry);
+      } else {
+        // Trigger acquire() for the waiter; they'll get a fresh entry.
+        this.acquire().then(next);
+      }
     }
   }
 
-  async _ensureClient(account) {
-    let entry = this._entries.get(account.id);
-    if (entry && entry.client && entry.client.usable) {
-      entry.lastUsed = Date.now();
-      return entry.client;
-    }
-    if (entry && entry.keepaliveTimer) clearInterval(entry.keepaliveTimer);
-
-    const client = _buildClient(account);
-    const connectPromise = client.connect();
+  async _build() {
+    const client = _buildClient(this.account);
     let timeoutId;
     const timeout = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error(`IMAP connect timeout (${CONNECT_TIMEOUT_MS}ms) for ${account.email}`)), CONNECT_TIMEOUT_MS);
+      timeoutId = setTimeout(() => reject(new Error(`IMAP connect timeout (${CONNECT_TIMEOUT_MS}ms) for ${this.account.email}`)), CONNECT_TIMEOUT_MS);
     });
     try {
-      await Promise.race([connectPromise, timeout]);
+      await Promise.race([client.connect(), timeout]);
     } finally {
       clearTimeout(timeoutId);
     }
-
-    entry = entry || { mutex: Promise.resolve() };
-    entry.client = client;
-    entry.lastUsed = Date.now();
-    entry.keepaliveTimer = setInterval(() => {
-      const e = this._entries.get(account.id);
-      if (!e || !e.client || !e.client.usable) return;
-      // Best-effort NOOP; ignore failures, the next acquire() will reconnect.
-      e.client.noop().catch(() => {});
+    const entry = { client, inUse: false, lastUsed: Date.now() };
+    entry.keepalive = setInterval(() => {
+      if (!entry.client || !entry.client.usable) return;
+      entry.client.noop().catch(() => {});
     }, KEEPALIVE_MS);
-    if (typeof entry.keepaliveTimer.unref === "function") entry.keepaliveTimer.unref();
-
+    if (typeof entry.keepalive.unref === "function") entry.keepalive.unref();
     client.on("close", () => {
-      const e = this._entries.get(account.id);
-      if (e && e.keepaliveTimer) clearInterval(e.keepaliveTimer);
-      // Leave the entry but mark as unusable; next acquire rebuilds.
-      if (e) e.client = null;
+      clearInterval(entry.keepalive);
+      entry.client = null;
+      const idx = this.entries.indexOf(entry);
+      if (idx >= 0) this.entries.splice(idx, 1);
     });
-
-    this._entries.set(account.id, entry);
-    return client;
-  }
-
-  // Run fn(client) with a guaranteed-live client, serialized per-account.
-  async withClient(account, fn) {
-    return this._withMutex(account.id, async () => {
-      // One automatic retry on EPIPE / close / connection errors that bubble
-      // up before we even get to do the work.
-      try {
-        const client = await this._ensureClient(account);
-        return await fn(client);
-      } catch (err) {
-        const msg = (err && err.message) || "";
-        if (/usable|EPIPE|ECONNRESET|connection.*closed|not connected/i.test(msg)) {
-          // Force a fresh connection and retry once.
-          const e = this._entries.get(account.id);
-          if (e && e.client) {
-            try { await e.client.logout(); } catch { /* ignore */ }
-            e.client = null;
-          }
-          const client = await this._ensureClient(account);
-          return await fn(client);
-        }
-        throw err;
-      }
-    });
+    return entry;
   }
 
   async closeAll() {
-    for (const [id, entry] of this._entries.entries()) {
-      if (entry.keepaliveTimer) clearInterval(entry.keepaliveTimer);
-      if (entry.client) {
-        try { await entry.client.logout(); } catch { /* ignore */ }
+    for (const e of this.entries) {
+      clearInterval(e.keepalive);
+      if (e.client) {
+        try { await e.client.logout(); } catch { /* ignore */ }
       }
-      this._entries.delete(id);
+    }
+    this.entries = [];
+    // Reject any pending waiters so they don't hang forever.
+    while (this.waiters.length) {
+      const w = this.waiters.shift();
+      try { w({ client: null, inUse: false }); } catch { /* ignore */ }
     }
   }
 
   stats() {
-    const out = [];
-    for (const [id, entry] of this._entries.entries()) {
-      out.push({
-        account_id: id,
-        connected: Boolean(entry.client && entry.client.usable),
-        last_used_ms_ago: entry.lastUsed ? Date.now() - entry.lastUsed : null,
-      });
+    return {
+      account_id: this.account.id,
+      clients: this.entries.length,
+      max_clients: this.maxSize,
+      in_use: this.entries.filter((e) => e.inUse).length,
+      waiters: this.waiters.length,
+      connected: this.entries.some((e) => e.client && e.client.usable),
+      last_used_ms_ago: this.entries.length
+        ? Date.now() - Math.max(...this.entries.map((e) => e.lastUsed || 0))
+        : null,
+    };
+  }
+}
+
+class ImapPool {
+  constructor() {
+    this._pools = new Map(); // accountId → AccountPool
+    this.maxPerAccount = MAX_CLIENTS_PER_ACCOUNT;
+  }
+
+  _poolFor(account) {
+    let p = this._pools.get(account.id);
+    if (!p) {
+      p = new AccountPool(account, this.maxPerAccount);
+      this._pools.set(account.id, p);
     }
-    return out;
+    return p;
+  }
+
+  // Run fn(client) with a guaranteed-live client. Multiple concurrent
+  // calls on the same account run in parallel on separate clients (up to
+  // maxPerAccount). One automatic retry on connection-level errors.
+  async withClient(account, fn) {
+    const pool = this._poolFor(account);
+    let entry = await pool.acquire();
+    try {
+      try {
+        return await fn(entry.client);
+      } catch (err) {
+        const msg = (err && err.message) || "";
+        if (/usable|EPIPE|ECONNRESET|connection.*closed|not connected|socket.*closed/i.test(msg)) {
+          // Drop the broken client and retry once with a fresh one.
+          try { if (entry.client) await entry.client.logout(); } catch { /* ignore */ }
+          entry.client = null;
+          pool.release(entry); // remove dead entry from inUse accounting
+          entry = await pool.acquire();
+          return await fn(entry.client);
+        }
+        throw err;
+      }
+    } finally {
+      pool.release(entry);
+    }
+  }
+
+  async closeAll() {
+    for (const p of this._pools.values()) {
+      // eslint-disable-next-line no-await-in-loop
+      await p.closeAll();
+    }
+    this._pools.clear();
+  }
+
+  stats() {
+    return [...this._pools.values()].map((p) => p.stats());
   }
 }
 

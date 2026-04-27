@@ -22,6 +22,41 @@ outputs and optional text summaries.
 - `mailbox monitor run --json`
 - `mailbox inbox --limit 15 --text`
 
+## MCP server mode (Claude Desktop / Code / Cursor)
+
+The CLI ships an MCP (Model Context Protocol) server so AI clients can
+call mailbox tools directly without shelling out:
+
+```bash
+# See the config snippet to paste into your AI client:
+mailbox mcp config --json
+
+# Or run the server manually for testing:
+mailbox mcp serve
+```
+
+Sample `claude_desktop_config.json` entry:
+
+```json
+{
+  "mcpServers": {
+    "mailbox": {
+      "command": "/path/to/node",
+      "args": ["/path/to/mailbox.js", "mcp", "serve"]
+    }
+  }
+}
+```
+
+Tools exposed (15): `account_list`, `account_test_connection`,
+`email_list`, `email_search`, `email_show`, `email_folders`,
+`email_mark`, `email_delete`, `email_flag`, `email_move`, `email_send`,
+`sync_status`, `sync_force`, `inbox_organize`, `digest_run`. Each
+destructive tool defaults to dry-run; pass `confirm: true` to apply.
+
+The MCP server uses the same daemon proxy as the CLI, so when a daemon
+is running every MCP tool call benefits from pooled connections too.
+
 ## Persistent daemon (5-30× faster CLI calls)
 
 Each one-shot CLI invocation otherwise spends 1-3s on TCP+TLS+IMAP LOGIN.
