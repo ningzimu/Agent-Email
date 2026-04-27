@@ -1344,7 +1344,7 @@ const _FLAG_MAP = {
   forwarded: "$Forwarded",
 };
 
-async function flagEmail({ email_id, set_flag, flag_type = "flagged", folder = "INBOX", account_id } = {}) {
+async function flagEmail({ email_id, set_flag, flag_type = "flagged", folder = "INBOX", account_id, dry_run = false } = {}) {
   const acc = accounts.getAccountByIdOrEmail(account_id);
   if (!acc.success) return acc;
   const openFolder = _normalizeFolder(folder);
@@ -1354,6 +1354,15 @@ async function flagEmail({ email_id, set_flag, flag_type = "flagged", folder = "
   const flagType = String(flag_type || "flagged").toLowerCase();
   const flag = _FLAG_MAP[flagType] || flagType;
   const set = Boolean(set_flag);
+
+  if (dry_run) {
+    return {
+      success: true,
+      dry_run: true,
+      would_flag: { email_id: String(uid), flag_type: flagType, set_flag: set, folder: openFolder, account: acc.account.email },
+      message: `Dry run: would ${set ? "set" : "unset"} flag "${flagType}" on ${uid}`,
+    };
+  }
 
   return withImapClient(acc.account, async (client) => {
     await client.mailboxOpen(openFolder);
@@ -1371,7 +1380,7 @@ async function flagEmail({ email_id, set_flag, flag_type = "flagged", folder = "
   });
 }
 
-async function moveEmails({ email_ids, target_folder, source_folder = "INBOX", account_id } = {}) {
+async function moveEmails({ email_ids, target_folder, source_folder = "INBOX", account_id, dry_run = false } = {}) {
   const ids = (email_ids || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
   if (!ids.length) return { success: false, error: "Missing email_ids" };
   const tgt = String(target_folder || "").trim();
@@ -1380,6 +1389,19 @@ async function moveEmails({ email_ids, target_folder, source_folder = "INBOX", a
 
   const acc = accounts.getAccountByIdOrEmail(account_id);
   if (!acc.success) return acc;
+
+  if (dry_run) {
+    return {
+      success: true,
+      dry_run: true,
+      would_move: ids.length,
+      email_ids: ids.map(String),
+      source_folder: src,
+      target_folder: tgt,
+      account: acc.account.email,
+      message: `Dry run: would move ${ids.length} emails from "${src}" to "${tgt}"`,
+    };
+  }
 
   return withImapClient(acc.account, async (client) => {
     await client.mailboxOpen(src);

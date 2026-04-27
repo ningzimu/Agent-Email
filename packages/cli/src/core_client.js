@@ -100,6 +100,27 @@ async function _maybeConnect() {
   });
 }
 
+// Functions that mutate remote state. If a daemon RPC fails AFTER we've
+// already written the request to the socket, we cannot tell whether the
+// daemon performed the action — falling back to in-process would risk
+// double-execution (sent emails, double-deletes, etc). For this allow-list
+// we surface the RPC failure to the caller instead and let them retry.
+const MUTATING_FNS = new Set([
+  "email.sendEmail",
+  "email.deleteEmails",
+  "email.markEmails",
+  "email.flagEmail",
+  "email.moveEmails",
+  "email.replyEmail",
+  "email.forwardEmail",
+  "email.downloadAttachments",
+  "sync.force",
+  "sync.init",
+  "digest.run",
+  "monitor.run",
+  "inbox.run",
+]);
+
 function _wrapNamespace(nsName, realObj) {
   const handler = {
     get(_, fname) {
@@ -108,16 +129,30 @@ function _wrapNamespace(nsName, realObj) {
       const direct = realObj && realObj[fname];
       // For non-function exports (constants etc.), pass straight through.
       if (typeof direct !== "function") return direct;
+      const fullName = `${nsName}.${fname}`;
       return async function (...callArgs) {
         const args = callArgs[0]; // every core fn takes a single options object
+        const isMutator = MUTATING_FNS.has(fullName);
+        const isDryRun = isMutator && args && (args.dry_run === true);
         const client = await _maybeConnect();
         if (client) {
           try {
-            return await client.call(`${nsName}.${fname}`, args);
+            return await client.call(fullName, args);
           } catch (e) {
-            // RPC failed (e.g. daemon crashed mid-call). Fall through to
-            // in-process execution so the user still gets a result.
-            if (process.env.MAILBOX_DAEMON_DEBUG) process.stderr.write(`mailbox: daemon call ${nsName}.${fname} failed: ${e.message}; falling back to direct\n`);
+            const msg = e && e.message ? e.message : String(e);
+            // For mutating calls that aren't dry-run, refuse to retry
+            // in-process: the daemon may have already performed the work
+            // and we'd execute it twice. Surface the failure instead.
+            if (isMutator && !isDryRun) {
+              if (process.env.MAILBOX_DAEMON_DEBUG) process.stderr.write(`mailbox: daemon call ${fullName} failed: ${msg}; refusing fallback for mutating call\n`);
+              return {
+                success: false,
+                error: `daemon RPC failed for ${fullName}: ${msg}. Refusing to fall back to direct execution because it may have already mutated state. Re-check before retrying.`,
+                error_code: "daemon_rpc_failed",
+                daemon_rpc_failed: true,
+              };
+            }
+            if (process.env.MAILBOX_DAEMON_DEBUG) process.stderr.write(`mailbox: daemon call ${fullName} failed: ${msg}; falling back to direct\n`);
           }
         }
         return direct.apply(realObj, callArgs);

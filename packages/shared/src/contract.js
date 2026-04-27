@@ -62,7 +62,9 @@ const LEAN_DROP_PER_EMAIL = new Set([
   "account",
   "source",
   "is_flagged",
-  "preview",
+  // NOTE: do NOT drop `preview` here. It's only present when the caller
+  // asked for it via --with-preview, and the empty-string check in
+  // leanResult below already handles the unset case.
 ]);
 
 function leanResult(result) {
@@ -93,16 +95,20 @@ function leanResult(result) {
 // Infer a stable, machine-readable error_code from a free-text error
 // message. Lets the JSON contract include both a human string (`error`)
 // and an enum (`error_code`) without rewriting every internal call site.
+// Order matters: specific patterns MUST come before generic catch-alls
+// like /^Invalid / which would otherwise shadow them.
 const ERROR_CODE_RULES = [
   [/^Account not found/i, "account_not_found"],
   [/^Email not found/i, "email_not_found"],
   [/^Mailbox not found|^Folder not found|does not exist/i, "folder_not_found"],
-  [/^Provide at least one of|^Missing |^Specify exactly one|^Invalid /i, "invalid_argument"],
+  // Specific argument-level codes BEFORE the generic /^Invalid / fallback.
   [/is not a valid date/i, "invalid_date"],
   [/must be a non-negative number|exceeds MAILBOX_MAX_LIMIT/i, "invalid_limit"],
   [/^Mixed account_ids/i, "ambiguous_account"],
   [/exceeds MAILBOX_MAX_BODY_FILE_BYTES|exceeds MAILBOX_MAX_MESSAGE_BYTES/i, "size_limit"],
   [/AUTHENTICATIONFAILED|Invalid credentials|535[\s-]/i, "auth_failed"],
+  // Now the generic argument-validation catch-all.
+  [/^Provide at least one of|^Missing |^Specify exactly one|^Invalid /i, "invalid_argument"],
   [/ECONNREFUSED|ETIMEDOUT|ENOTFOUND|getaddrinfo/i, "network_error"],
   [/SMTP|Greylisted|Mail rejected/i, "smtp_error"],
   [/IMAP|search failed|fetch failed|client\.list/i, "imap_error"],
