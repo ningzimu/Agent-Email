@@ -393,14 +393,47 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       source: "cache_sync_db",
     }));
 
-    const total_in_folder = Number(_execScalar(h.db, totalSql, filterParams) || emails.length);
-    const unread_count = Number(_execScalar(h.db, unreadSql, filterParams) || emails.filter((e) => e.unread).length);
+    // Counts within the cached subset. Note: the daemon syncs only the
+    // newest N emails per account (default 200), so these can be a lot
+    // smaller than the real IMAP folder size.
+    const cached_emails = Number(_execScalar(h.db, totalSql, filterParams) || emails.length);
+    const cached_unread = Number(_execScalar(h.db, unreadSql, filterParams) || emails.filter((e) => e.unread).length);
+
+    // Real folder size + unread count, snapshotted from IMAP STATUS at the
+    // last sync. Surfaces folders.message_count / folders.unread_count when
+    // we have a single account scope; falls back to the cached-subset
+    // counts when listing across multiple accounts (folders aggregation
+    // would need a join we'd rather not pay for in the hot path).
+    let total_in_folder = cached_emails;
+    let unread_count = cached_unread;
+    if (accountId) {
+      const folderName = (resolvedFolder === "all") ? "INBOX" : resolvedFolder;
+      const row = _execRows(h.db, "SELECT message_count, unread_count FROM folders WHERE account_id = ? AND name = ?", [String(accountId), folderName])[0];
+      if (row) {
+        // Important: 0 is a real value here (server reports zero unread).
+        // Use explicit null-checks instead of `||` so we don't fall back
+        // to the cached subset count.
+        if (row.message_count != null) total_in_folder = Number(row.message_count);
+        if (row.unread_count != null) unread_count = Number(row.unread_count);
+      }
+    } else {
+      // Cross-account: aggregate folders.unread_count + folders.message_count
+      // for the requested folder name across every account that has synced.
+      const folderName = (resolvedFolder === "all") ? "INBOX" : resolvedFolder;
+      const aggRow = _execRows(h.db, "SELECT SUM(message_count) AS total, SUM(unread_count) AS unread FROM folders WHERE name = ?", [folderName])[0];
+      if (aggRow && aggRow.total != null) {
+        total_in_folder = Number(aggRow.total);
+        unread_count = aggRow.unread != null ? Number(aggRow.unread) : 0;
+      }
+    }
 
     return {
       success: true,
       emails,
       total_in_folder,
       unread_count,
+      cached_emails,
+      cached_unread,
       offset: Number(offset),
       limit: Number(limit),
       from_cache: true,
