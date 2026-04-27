@@ -79,6 +79,31 @@ async function startDaemon({ foreground = true, log = console.error, syncInterva
 
   fs.writeFileSync(getPidFilePath(), String(process.pid), { mode: 0o600 });
 
+  // Prewarm: open one IMAP connection per configured account in
+  // parallel so the first CLI/MCP call doesn't pay the 1-3s TCP+TLS+
+  // LOGIN cost. We don't await the whole prewarm — it kicks off in
+  // the background so the daemon is reachable immediately.
+  (async () => {
+    try {
+      const all = await core.accounts.getAllAccountsResolved();
+      if (!all || !all.success) return;
+      const targets = (all.accounts || []).filter((a) => !syncAccountId || a.id === syncAccountId);
+      stats.prewarm = { started: targets.length, completed: 0, failed: 0 };
+      await Promise.all(targets.map(async (acc) => {
+        try {
+          await pool.withClient(acc, async (client) => { await client.noop(); });
+          stats.prewarm.completed += 1;
+        } catch (e) {
+          stats.prewarm.failed += 1;
+          log(`[mailbox daemon] prewarm ${acc.email} failed: ${(e && e.message) || e}`);
+        }
+      }));
+      log(`[mailbox daemon] prewarmed ${stats.prewarm.completed}/${stats.prewarm.started} account(s)`);
+    } catch (e) {
+      log(`[mailbox daemon] prewarm aborted: ${(e && e.message) || e}`);
+    }
+  })();
+
   // Background sync loop. Runs in-process so it shares the same pooled
   // IMAP connections as RPC traffic — no extra TCP handshakes for the
   // periodic refresh. AI clients hitting `email list` (without --live)

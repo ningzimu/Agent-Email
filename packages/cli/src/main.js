@@ -1209,8 +1209,21 @@ async function main(argv) {
       const result = await _daemonAdmin("__ping");
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: (r) => {
         if (!r.success) { process.stderr.write((r.error || "not running") + "\n"); return; }
-        process.stdout.write(`daemon pid=${r.pid} uptime_ms=${r.uptime_ms}\n`);
-        for (const p of r.pool || []) process.stdout.write(`  ${p.account_id}: ${p.connected ? "connected" : "idle"} (last_used_ms_ago=${p.last_used_ms_ago})\n`);
+        const upS = r.uptime_ms != null ? Math.round(r.uptime_ms / 1000) : "?";
+        process.stdout.write(`daemon pid=${r.pid} uptime=${upS}s\n`);
+        process.stdout.write("\npool:\n");
+        if (!(r.pool || []).length) process.stdout.write("  (no accounts connected yet — prewarm or first call will populate)\n");
+        for (const p of r.pool || []) {
+          const inUse = p.in_use != null ? `, ${p.in_use}/${p.clients} in use` : "";
+          process.stdout.write(`  ${p.account_id}: ${p.connected ? "connected" : "idle"}${inUse}\n`);
+        }
+        if (r.sync) {
+          process.stdout.write("\nsync:\n");
+          process.stdout.write(`  attempted=${r.sync.syncs_attempted} ok=${r.sync.syncs_ok} failed=${r.sync.syncs_failed}\n`);
+          if (r.sync.last_sync_at) process.stdout.write(`  last_sync_at=${r.sync.last_sync_at}\n`);
+          if (r.sync.last_sync_error) process.stdout.write(`  last_sync_error=${r.sync.last_sync_error}\n`);
+          if (r.sync.prewarm) process.stdout.write(`  prewarm=${r.sync.prewarm.completed}/${r.sync.prewarm.started} (${r.sync.prewarm.failed} failed)\n`);
+        }
       } });
       process.exit(rc);
     });
