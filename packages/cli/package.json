@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20"
   },
   "bin": {
     "mailbox-dev": "bin/mailbox.js"
