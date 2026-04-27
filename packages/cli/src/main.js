@@ -436,8 +436,8 @@ async function main(argv) {
   accountCmd
     .command("list")
     .description("List configured accounts")
-    .action(() => {
-      const result = accounts.listAccounts();
+    .action(async () => {
+      const result = await accounts.listAccounts();
       const rc = contract.handleJsonOrText({
         result,
         asJson,
@@ -459,14 +459,14 @@ async function main(argv) {
         let targets = [];
 
         if (accId) {
-          const one = accounts.getAccountByIdOrEmail(accId);
+          const one = await accounts.getAccountByIdOrEmail(accId);
           if (!one.success) {
             result = { success: false, error: one.error || `Account not found: ${accId}`, accounts: [], total_accounts: 0 };
           } else {
             targets = [one.account];
           }
         } else {
-          const all = accounts.getAllAccountsResolved();
+          const all = await accounts.getAllAccountsResolved();
           if (!all.success) {
             result = all;
           } else {
@@ -989,8 +989,8 @@ async function main(argv) {
   syncCmd
     .command("status")
     .description("Show scheduler status")
-    .action(() => {
-      const result = sync.status();
+    .action(async () => {
+      const result = await sync.status();
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("sync status") });
       process.exit(rc);
     });
@@ -1015,8 +1015,8 @@ async function main(argv) {
   syncCmd
     .command("health")
     .description("Show sync health summary")
-    .action(() => {
-      const result = sync.health();
+    .action(async () => {
+      const result = await sync.health();
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("sync health") });
       process.exit(rc);
     });
@@ -1031,7 +1031,8 @@ async function main(argv) {
       const stop = _createStopSignal();
       try {
         while (!stop.stopped()) {
-          const status = sync.status();
+          // eslint-disable-next-line no-await-in-loop
+          const status = await sync.status();
           status.success = true;
           printJson(status, Boolean(pretty) || !asJson);
           // eslint-disable-next-line no-await-in-loop
@@ -1088,8 +1089,8 @@ async function main(argv) {
   digestCmd
     .command("config")
     .description("Print current configuration")
-    .action(() => {
-      const result = digest.getConfig();
+    .action(async () => {
+      const result = await digest.getConfig();
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("digest config") });
       process.exit(rc);
     });
@@ -1129,16 +1130,16 @@ async function main(argv) {
   monitorCmd
     .command("status")
     .description("Get monitoring status")
-    .action(() => {
-      const result = monitor.status();
+    .action(async () => {
+      const result = await monitor.status();
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("monitor status") });
       process.exit(rc);
     });
   monitorCmd
     .command("config")
     .description("Print current configuration")
-    .action(() => {
-      const result = monitor.config();
+    .action(async () => {
+      const result = await monitor.config();
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("monitor config") });
       process.exit(rc);
     });
@@ -1146,8 +1147,8 @@ async function main(argv) {
     .command("test")
     .description("Test individual components")
     .argument("[component]", "fetch|notify|all", "all")
-    .action((component) => {
-      const result = monitor.test({ component });
+    .action(async (component) => {
+      const result = await monitor.test({ component });
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("monitor test") });
       process.exit(rc);
     });

@@ -2,51 +2,36 @@ name: Unit Tests
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        node-version: ["18.17", "20", "22"]
 
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    
-    - name: Install UV
-      run: |
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-    
-    - name: Install dependencies
-      run: |
-        uv venv
-        uv pip install -e ".[test]"
-    
-    - name: Run unit tests
-      run: |
-        uv run pytest tests/ -v --tb=short
-    
-    - name: Run tests with unittest
-      run: |
-        uv run python tests/run_tests.py
-    
-    - name: Generate coverage report
-      run: |
-        uv run pytest tests/ --cov=src --cov-report=xml --cov-report=term
-    
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        # Tests use mocked IMAP via MAILBOX_INTERNAL_TEST_MODE; explicitly
+        # disable any persistent daemon probe so a stray socket from a
+        # cached runner doesn't route the calls elsewhere.
+        env:
+          MAILBOX_NO_DAEMON: "1"
+        run: pnpm test
