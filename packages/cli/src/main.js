@@ -184,6 +184,115 @@ function _resolveEmailRefs(rawIds, explicitAccountId) {
   return { ids: refs.map((r) => r.id), accountId: resolved };
 }
 
+function _emailIdArgs(rawIds) {
+  return Array.isArray(rawIds) ? rawIds : [];
+}
+
+function _hasEmailTargets(rawIds, opts) {
+  const ids = _emailIdArgs(rawIds).flatMap((id) => String(id).split(/[\s,]+/).filter(Boolean));
+  return ids.length > 0 || Boolean(opts.from) || Boolean(opts.subject);
+}
+
+function _targetSample(emails) {
+  return (emails || []).slice(0, 5).map((e) => ({
+    uid: String(e.uid || e.id || ""),
+    subject: e.subject || "",
+    from: e.from || "",
+  }));
+}
+
+function _groupTargetUids(emails, fallbackAccountId) {
+  const groups = new Map();
+  for (const e of emails || []) {
+    const uid = String(e.uid || e.id || "").trim();
+    if (!uid) continue;
+    const accountId = String(e.account_id || fallbackAccountId || "");
+    if (!groups.has(accountId)) groups.set(accountId, []);
+    groups.get(accountId).push(uid);
+  }
+  return groups;
+}
+
+function _filteredDryRunResult({ operation, targets, markAs, permanent }) {
+  const out = {
+    success: true,
+    dry_run: true,
+    would_target_count: targets.length,
+    would_target_sample: _targetSample(targets),
+    confirmation_required: true,
+    confirmation_hint: "Re-run with --confirm to apply changes",
+  };
+  if (operation === "delete") {
+    out.would_delete = targets.length;
+    out.permanent = Boolean(permanent);
+    out.message = `Dry run: would ${permanent ? "delete" : "move to trash"} ${targets.length} emails`;
+  } else {
+    out.would_mark = targets.length;
+    out.mark_as = markAs;
+    out.message = `Dry run: would mark ${targets.length} emails as ${markAs}`;
+  }
+  return out;
+}
+
+async function _searchFilteredEmailTargets(opts) {
+  const result = await email.searchEmails({
+    from: opts.from,
+    subject: opts.subject,
+    account_id: opts.accountId,
+    unread_only: opts.unreadOnly,
+    folder: opts.folder,
+    limit: 1000,
+  });
+  if (!result || !result.success) return { result, targets: [], groups: new Map() };
+  const targets = (result.emails || []).filter((e) => String(e.uid || e.id || "").trim());
+  return {
+    result,
+    targets,
+    groups: _groupTargetUids(targets, opts.accountId),
+  };
+}
+
+async function _applyFilteredEmailMutation({ operation, opts, targets, groups, markAs }) {
+  if (Boolean(opts.dryRun) || !Boolean(opts.confirm)) {
+    return _filteredDryRunResult({
+      operation,
+      targets,
+      markAs,
+      permanent: Boolean(opts.permanent),
+    });
+  }
+
+  const results = [];
+  for (const [accountId, emailIds] of groups.entries()) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = operation === "delete"
+      ? await email.deleteEmails({
+        email_ids: emailIds,
+        folder: opts.folder,
+        permanent: Boolean(opts.permanent),
+        trash_folder: opts.trashFolder,
+        account_id: accountId,
+        dry_run: false,
+      })
+      : await email.markEmails({
+        email_ids: emailIds,
+        mark_as: markAs,
+        folder: opts.folder,
+        account_id: accountId,
+        dry_run: false,
+      });
+    results.push({ account_id: accountId, ...result });
+  }
+
+  if (results.length === 1) return results[0];
+  return {
+    success: results.every((r) => r && r.success),
+    matched_count: targets.length,
+    accounts_count: results.length,
+    results,
+  };
+}
+
 // Validate --limit/--offset. Returns { ok, limit, offset, error }.
 function _validatePaging(limitRaw, offsetRaw, { defaultLimit }) {
   const limit = limitRaw == null || limitRaw === "" ? defaultLimit : Number(limitRaw);
@@ -693,28 +802,63 @@ async function main(argv) {
   emailCmd
     .command("mark")
     .description("Mark emails read/unread")
-    .argument("<email_ids...>")
+    .argument("[email_ids...]")
     .option("--read", "Mark as read")
     .option("--unread", "Mark as unread")
+    .option("--mark-as <state>", "Mark as read/unread")
     .option("--account-id <id>")
     .option("--folder <name>", "Folder", "INBOX")
-    .option("--confirm", "Apply changes (default: dry-run)")
+    .option("--from <addr>", "Filter by sender substring (IMAP server-side search)")
+    .option("--subject <s>", "Filter by subject substring (IMAP server-side search)")
+    .option("--unread-only", "Only target unread emails (combine with --from/--subject)")
+    .option("--confirm", "Apply changes; required when >100 filter matches")
     .option("--dry-run")
     .action(async (ids, opts) => {
       const read = Boolean(opts.read);
       const unread = Boolean(opts.unread);
-      if ((read && unread) || (!read && !unread)) {
+      const markAsOption = opts.markAs ? String(opts.markAs).toLowerCase() : "";
+      const requestedStates = [
+        read ? "read" : "",
+        unread ? "unread" : "",
+        markAsOption,
+      ].filter(Boolean);
+      if (requestedStates.length !== 1 || (markAsOption && markAsOption !== "read" && markAsOption !== "unread")) {
         const rc = contract.invalidUsage({ message: "Specify exactly one of --read/--unread", asJson, pretty });
-        process.exit(rc);
+        return process.exit(rc);
+      }
+      if (!_hasEmailTargets(ids, opts)) {
+        const rc = contract.invalidUsage({ message: "Must provide email_ids, --from, or --subject", asJson, pretty });
+        return process.exit(rc);
       }
 
-      const refs = _resolveEmailRefs(ids, opts.accountId);
+      const mark_as = requestedStates[0];
+      if (opts.from || opts.subject) {
+        const searched = await _searchFilteredEmailTargets(opts);
+        if (!searched.result || !searched.result.success) {
+          const rc = contract.handleJsonOrText({ result: searched.result, asJson, pretty, printText: () => _printTextNotImplemented("email mark") });
+          return process.exit(rc);
+        }
+        if (searched.targets.length > 100 && !opts.confirm) {
+          const rc = contract.invalidUsage({ message: `Matched ${searched.targets.length} emails. Add --confirm to proceed.`, asJson, pretty });
+          return process.exit(rc);
+        }
+        const result = await _applyFilteredEmailMutation({
+          operation: "mark",
+          opts,
+          targets: searched.targets,
+          groups: searched.groups,
+          markAs: mark_as,
+        });
+        const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email mark") });
+        return process.exit(rc);
+      }
+
+      const refs = _resolveEmailRefs(_emailIdArgs(ids), opts.accountId);
       if (refs.error) {
         const rc = contract.invalidUsage({ message: refs.error, asJson, pretty });
-        process.exit(rc);
+        return process.exit(rc);
       }
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
-      const mark_as = unread ? "unread" : "read";
       const result = await email.markEmails({
         email_ids: refs.ids,
         mark_as,
@@ -727,24 +871,52 @@ async function main(argv) {
         result.confirmation_hint = "Re-run with --confirm to apply changes";
       }
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email mark") });
-      process.exit(rc);
+      return process.exit(rc);
     });
 
   emailCmd
     .command("delete")
     .description("Delete emails")
-    .argument("<email_ids...>")
+    .argument("[email_ids...]")
     .option("--account-id <id>")
     .option("--folder <name>", "Folder", "INBOX")
+    .option("--from <addr>", "Filter by sender substring (IMAP server-side search)")
+    .option("--subject <s>", "Filter by subject substring (IMAP server-side search)")
+    .option("--unread-only", "Only target unread emails (combine with --from/--subject)")
     .option("--permanent")
     .option("--trash-folder <name>", "Trash folder", "Trash")
-    .option("--confirm", "Apply changes (default: dry-run)")
+    .option("--confirm", "Apply changes; required when >100 filter matches")
     .option("--dry-run")
     .action(async (ids, opts) => {
-      const refs = _resolveEmailRefs(ids, opts.accountId);
+      if (!_hasEmailTargets(ids, opts)) {
+        const rc = contract.invalidUsage({ message: "Must provide email_ids, --from, or --subject", asJson, pretty });
+        return process.exit(rc);
+      }
+
+      if (opts.from || opts.subject) {
+        const searched = await _searchFilteredEmailTargets(opts);
+        if (!searched.result || !searched.result.success) {
+          const rc = contract.handleJsonOrText({ result: searched.result, asJson, pretty, printText: () => _printTextNotImplemented("email delete") });
+          return process.exit(rc);
+        }
+        if (searched.targets.length > 100 && !opts.confirm) {
+          const rc = contract.invalidUsage({ message: `Matched ${searched.targets.length} emails. Add --confirm to proceed.`, asJson, pretty });
+          return process.exit(rc);
+        }
+        const result = await _applyFilteredEmailMutation({
+          operation: "delete",
+          opts,
+          targets: searched.targets,
+          groups: searched.groups,
+        });
+        const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email delete") });
+        return process.exit(rc);
+      }
+
+      const refs = _resolveEmailRefs(_emailIdArgs(ids), opts.accountId);
       if (refs.error) {
         const rc = contract.invalidUsage({ message: refs.error, asJson, pretty });
-        process.exit(rc);
+        return process.exit(rc);
       }
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
       const result = await email.deleteEmails({
@@ -760,7 +932,7 @@ async function main(argv) {
         result.confirmation_hint = "Re-run with --confirm to apply changes";
       }
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email delete") });
-      process.exit(rc);
+      return process.exit(rc);
     });
 
   emailCmd
