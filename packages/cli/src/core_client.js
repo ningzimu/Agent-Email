@@ -86,8 +86,11 @@ class DaemonClient {
 
 async function _maybeConnect() {
   // Daemon disabled by env knob (useful when an agent has no daemon and
-  // wants to skip the probe latency).
+  // wants to skip the probe latency). Internal test mode also bypasses the
+  // daemon so MAILBOX_CONFIG_DIR fixtures aren't shadowed by a daemon
+  // started against the user's real auth.json.
   if (String(process.env.MAILBOX_NO_DAEMON || "").trim() === "1") return null;
+  if (String(process.env.MAILBOX_INTERNAL_TEST_MODE || "").trim() === "1") return null;
 
   // Reuse a live client.
   if (_client && _client.conn && !_client.conn.destroyed) return _client;

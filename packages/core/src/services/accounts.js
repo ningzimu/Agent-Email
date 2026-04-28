@@ -25,6 +25,11 @@ function _normalizeAuth(auth) {
   return auth;
 }
 
+function _hasConfigDirOverride() {
+  const raw = String(process.env.MAILBOX_CONFIG_DIR || "").trim();
+  return Boolean(raw && raw !== ".");
+}
+
 function _legacyAccountsCandidates() {
   const repoData = path.resolve(process.cwd(), "data", "accounts.json");
   const home = require("os").homedir();
@@ -42,6 +47,10 @@ function loadAuth() {
   const p = paths.getPathConfig();
   const auth = _readJsonFile(p.authJson);
   if (auth) return { success: true, auth: _normalizeAuth(auth), migrated: false };
+
+  if (_hasConfigDirOverride()) {
+    return { success: true, auth: _normalizeAuth(null), migrated: false };
+  }
 
   // Legacy migration: read accounts.json-like content and write auth.json.
   for (const candidate of _legacyAccountsCandidates()) {
