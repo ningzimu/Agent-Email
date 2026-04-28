@@ -530,6 +530,7 @@ async function main(argv) {
     .option("--offset <n>", "Offset", "0")
     .option("--unread-only", "Only unread")
     .option("--account-id <id>", "Account id/email")
+    .option("--from <addr>", "Filter by sender (substring, cache-side)")
     .option("--date-from <s>", "Filter from date (YYYY-MM-DD or ISO)")
     .option("--date-to <s>", "Filter to date (YYYY-MM-DD or ISO)")
     .option("--folder <name>", "Folder (currently only INBOX is supported here; use 'email search' for cross-folder)", "INBOX")
@@ -558,6 +559,7 @@ async function main(argv) {
         unread_only: Boolean(opts.unreadOnly),
         folder: opts.folder,
         account_id: opts.accountId || "",
+        from: opts.from || "",
         date_from: dateFromExpanded,
         date_to: dateToExpanded,
         use_cache: !Boolean(opts.live),
@@ -572,6 +574,7 @@ async function main(argv) {
       if (opts.dateFrom) result.date_from = opts.dateFrom;
       if (opts.dateTo) result.date_to = opts.dateTo;
       if (opts.accountId) result.account_id = opts.accountId;
+      if (opts.from) result.from = opts.from;
 
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: _printEmailList });
       process.exit(rc);

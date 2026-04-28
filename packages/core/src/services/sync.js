@@ -94,7 +94,7 @@ async function force({ account_id = "", full = false } = {}) {
     const email = require("./email");
     try {
       // eslint-disable-next-line no-await-in-loop
-      const listRes = await email.listEmails({ limit: 200, offset: 0, unread_only: false, folder: "INBOX", account_id: a.id, use_cache: false });
+      const listRes = await email.listEmails({ limit: 200, offset: 0, unread_only: false, folder: "INBOX", account_id: a.id, use_cache: false, include_server_uids: true });
 
       // Single write session per account: one DB open, one flush, one file
       // lock. Prevents lost updates across concurrent CLI invocations and
@@ -115,6 +115,25 @@ async function force({ account_id = "", full = false } = {}) {
         }
       });
 
+      let emailsDeleted = 0;
+      if (listRes.all_uids_are_complete && Array.isArray(listRes.server_uids)) {
+        const serverUids = new Set(listRes.server_uids.map((uid) => String(uid)));
+        const cachedUids = await syncDb.getEmailUIDsFromCache({
+          dbPath: pc.emailSyncDb,
+          accountId: a.id,
+          folder: "INBOX",
+        });
+        const orphanedUids = cachedUids.filter((uid) => !serverUids.has(String(uid)));
+        if (orphanedUids.length) {
+          const removed = await syncDb.removeEmailsFromCache({
+            dbPath: pc.emailSyncDb,
+            accountId: a.id,
+            uids: orphanedUids,
+          });
+          if (removed && removed.success) emailsDeleted = orphanedUids.length;
+        }
+      }
+
       const per = {
         last_sync: _nowIso(),
         total_emails: listRes.total_in_folder || 0,
@@ -122,7 +141,7 @@ async function force({ account_id = "", full = false } = {}) {
       };
       if (!state.accounts) state.accounts = {};
       state.accounts[a.id] = per;
-      results.push({ success: true, account_id: a.id, folders_synced: 1, emails_added: 0, emails_updated: 0 });
+      results.push({ success: true, account_id: a.id, folders_synced: 1, emails_added: 0, emails_updated: 0, emails_deleted: emailsDeleted });
     } catch (e) {
       results.push({ success: false, account_id: a.id, error: e && e.message ? e.message : "sync failed" });
     }
@@ -136,7 +155,7 @@ async function force({ account_id = "", full = false } = {}) {
   if (account_id) {
     const one = results[0] || { success: false, error: "No account matched" };
     if (!one.success) return { success: false, error: one.error || "sync failed" };
-    return { success: true, account_id: one.account_id, folders_synced: one.folders_synced || 0, emails_added: 0, emails_updated: 0 };
+    return { success: true, account_id: one.account_id, folders_synced: one.folders_synced || 0, emails_added: 0, emails_updated: 0, emails_deleted: one.emails_deleted || 0 };
   }
 
   const okCount = results.filter((r) => r.success).length;
@@ -146,6 +165,7 @@ async function force({ account_id = "", full = false } = {}) {
     total_accounts: results.length,
     emails_added: 0,
     emails_updated: 0,
+    emails_deleted: results.reduce((sum, r) => sum + Number(r.emails_deleted || 0), 0),
     sync_time,
     results,
   };

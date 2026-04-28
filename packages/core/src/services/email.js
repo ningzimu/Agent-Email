@@ -115,7 +115,7 @@ function _parseDateInput(raw, { end = false } = {}) {
   return { date: d, sql };
 }
 
-async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOnly, since, before, previewChars = 0 }) {
+async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOnly, since, before, previewChars = 0, includeServerUids = false }) {
   const openFolder = _normalizeFolder(folder);
   return withImapClient(account, async (client) => {
     const st = await client.mailboxOpen(openFolder);
@@ -149,6 +149,7 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
     }
     const sorted = _uidsSortedDesc(uids);
     const slice = sorted.slice(offset, offset + limit);
+    const allUidsAreComplete = !unreadOnly && !since && !before;
 
     const wantPreview = previewChars > 0 && slice.length > 0 && slice.length <= 50;
     const emails = [];
@@ -195,7 +196,7 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
       emails.push(item);
     }
 
-    return {
+    const result = {
       success: true,
       emails,
       total_in_folder: Number(st.exists || 0),
@@ -204,6 +205,11 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
       fetched: emails.length,
       folder: openFolder,
     };
+    if (includeServerUids && allUidsAreComplete) {
+      result.server_uids = sorted.map((uid) => String(uid));
+      result.all_uids_are_complete = true;
+    }
+    return result;
   });
 }
 
@@ -217,8 +223,12 @@ async function listEmails({
   date_from = "",
   date_to = "",
   preview_chars = 0,
+  from = "",
+  include_server_uids = false,
 } = {}) {
   const previewChars = Math.max(0, Number(preview_chars || 0));
+  const fromFilter = String(from || "").trim();
+  const includeServerUids = Boolean(include_server_uids);
   // The cache backend returns envelope-only rows; preview requires live IMAP.
   if (previewChars > 0) use_cache = false;
   const lim = Math.max(0, Number(limit || 0));
@@ -247,6 +257,7 @@ async function listEmails({
         offset: off,
         dateFrom: sqlFrom,
         dateTo: sqlTo,
+        from: fromFilter,
       });
       if (cache && cache.success) {
         // Add multi-account metadata similar to Python contract.
@@ -272,7 +283,7 @@ async function listEmails({
   if (account_id) {
     const acc = accounts.getAccountByIdOrEmail(account_id);
     if (!acc.success) return acc;
-    const r = await _fetchEmailsForAccount({ account: acc.account, folder, limit: lim, offset: off, unreadOnly, since, before, previewChars });
+    const r = await _fetchEmailsForAccount({ account: acc.account, folder, limit: lim, offset: off, unreadOnly, since, before, previewChars, includeServerUids });
     if (!r.success) return r;
     results.push({ account: acc.account, ...r });
   } else {
@@ -308,6 +319,7 @@ async function listEmails({
           since,
           before,
           previewChars,
+          includeServerUids,
         });
         results.push({ account: acc, ...r });
       } catch (e) {
@@ -349,7 +361,7 @@ async function listEmails({
   const total_in_folder = ok.reduce((sum, r) => sum + Number(r.total_in_folder || 0), 0);
   const unread_count = ok.reduce((sum, r) => sum + Number(r.unread_count || 0), 0);
 
-  return {
+  const out = {
     success: ok.length === results.length,
     emails,
     total_in_folder,
@@ -362,6 +374,12 @@ async function listEmails({
     limit: lim,
     from_cache: false,
   };
+  if (includeServerUids) {
+    const complete = ok.filter((r) => r.all_uids_are_complete);
+    out.all_uids_are_complete = ok.length > 0 && complete.length === ok.length;
+    if (ok.length === 1 && complete.length === 1) out.server_uids = complete[0].server_uids || [];
+  }
+  return out;
 }
 
 async function searchEmails({ query, from = "", subject = "", account_id = "", date_from = "", date_to = "", limit = 50, offset = 0, unread_only = false, folder = "all", preview_chars = 0 } = {}) {
@@ -980,8 +998,16 @@ async function markEmails({ email_ids, mark_as, folder = "INBOX", account_id = "
     }
     const marked = results.filter((r) => r.success).length;
     if (marked > 0) {
+      const successfulUids = results.filter((r) => r.success).map((r) => r.email_id);
+      const dbPath = paths.getPathConfig().emailSyncDb;
+      await syncDb.updateEmailFlags({
+        dbPath,
+        accountId: acc.account.id,
+        uids: successfulUids,
+        unread: markAs === "unread",
+      });
       await syncDb.invalidateFolderUnreadCount({
-        dbPath: paths.getPathConfig().emailSyncDb,
+        dbPath,
         accountId: acc.account.id,
         folder: openFolder,
       });
@@ -1136,6 +1162,13 @@ async function deleteEmails({ email_ids, folder = "INBOX", permanent = false, tr
       }
     }
     const deleted = results.filter((r) => r.success).length;
+    if (deleted > 0) {
+      await syncDb.removeEmailsFromCache({
+        dbPath: paths.getPathConfig().emailSyncDb,
+        accountId: acc.account.id,
+        uids: results.filter((r) => r.success).map((r) => r.email_id),
+      });
+    }
     return {
       success: deleted === results.length,
       deleted_count: deleted,

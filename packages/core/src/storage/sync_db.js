@@ -319,7 +319,11 @@ async function withWriteSession(dbPath, fn) {
   }
 }
 
-async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limit, offset, dateFrom, dateTo }) {
+function _placeholders(values) {
+  return values.map(() => "?").join(", ");
+}
+
+async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limit, offset, dateFrom, dateTo, from }) {
   if (!dbPath || !fs.existsSync(dbPath)) return null;
 
   const h = await openSyncDb(dbPath);
@@ -355,6 +359,10 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       query += " AND (f.name = ? COLLATE NOCASE OR (e.folder_id IS NULL AND ? = 'INBOX'))";
       filterParams.push(resolvedFolder);
       filterParams.push(resolvedFolder);
+    }
+    if (from) {
+      query += " AND LOWER(e.sender_email) LIKE LOWER(?)";
+      filterParams.push(`%${String(from)}%`);
     }
     // Snapshot the query BEFORE the unread filter so cached_emails is a
     // diagnostic of "how much is in cache for this scope" — independent
@@ -505,11 +513,67 @@ async function invalidateFolderUnreadCount({ dbPath, accountId, folder }) {
   }
 }
 
+async function removeEmailsFromCache({ dbPath, accountId, uids }) {
+  const ids = [...new Set((uids || []).map((x) => String(x).trim()).filter(Boolean))];
+  if (!ids.length) return { success: true, removed: 0 };
+  try {
+    await withWriteSession(dbPath, (s) => {
+      s.db.run(
+        `DELETE FROM emails WHERE account_id = ? AND uid IN (${_placeholders(ids)})`,
+        [String(accountId), ...ids]
+      );
+    });
+    return { success: true, removed: ids.length };
+  } catch (e) {
+    return { success: false, error: e && e.message ? e.message : "db error" };
+  }
+}
+
+async function updateEmailFlags({ dbPath, accountId, uids, unread }) {
+  const ids = [...new Set((uids || []).map((x) => String(x).trim()).filter(Boolean))];
+  if (!ids.length) return { success: true, updated: 0 };
+  try {
+    await withWriteSession(dbPath, (s) => {
+      s.db.run(
+        `UPDATE emails SET is_read = ?, updated_at = CURRENT_TIMESTAMP WHERE account_id = ? AND uid IN (${_placeholders(ids)})`,
+        [unread ? 0 : 1, String(accountId), ...ids]
+      );
+    });
+    return { success: true, updated: ids.length };
+  } catch (e) {
+    return { success: false, error: e && e.message ? e.message : "db error" };
+  }
+}
+
+async function getEmailUIDsFromCache({ dbPath, accountId, folder }) {
+  if (!dbPath || !fs.existsSync(dbPath)) return [];
+  const h = await openSyncDb(dbPath);
+  try {
+    const rows = _execRows(
+      h.db,
+      `
+        SELECT e.uid
+        FROM emails e
+        LEFT JOIN folders f ON e.folder_id = f.id
+        WHERE e.account_id = ?
+          AND (f.name = ? COLLATE NOCASE OR (e.folder_id IS NULL AND ? = 'INBOX'))
+      `,
+      [String(accountId), String(folder || "INBOX"), String(folder || "INBOX")]
+    );
+    return rows.map((r) => String(r.uid));
+  } finally {
+    try { h.close(); } catch { /* ignore */ }
+  }
+}
+
 module.exports = {
   listEmailsFromCache,
   upsertAccount,
   upsertFolder,
   upsertEmails,
   invalidateFolderUnreadCount,
+  removeEmailsFromCache,
+  updateEmailFlags,
+  getEmailUIDsFromCache,
   withWriteSession,
 };
