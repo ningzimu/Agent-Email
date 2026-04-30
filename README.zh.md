@@ -55,15 +55,21 @@ mailbox
 # 列出账户
 mailbox account list --json
 
-# 列出未读邮件（默认优先缓存；--live 强制走 IMAP）
+# 列出未读邮件（默认优先缓存；--from 缓存侧按发件人过滤）
 mailbox email list --unread-only --limit 20 --json
+mailbox email list --account-id my_account_id --from "newsletter" --json
 
-# 查看邮件详情
+# 查看邮件详情（响应包含 list_unsubscribe，方便一键退订）
 mailbox email show 123456 --account-id my_account_id --json
 
 # 标记已读（建议先 dry-run）
 mailbox email mark 123456 --read --account-id my_account_id --folder INBOX --dry-run --json
 mailbox email mark 123456 --read --account-id my_account_id --folder INBOX --confirm --json
+
+# 按发件人/主题批量操作（无需先查 UID）
+mailbox email mark --from "support@npmjs.com" --read --confirm --account-id my_account_id --json
+mailbox email delete --from "newsletter" --account-id my_account_id --json   # 不带 --confirm 是 dry-run 预览
+mailbox email delete --subject "[ad]" --account-id my_account_id --confirm --json
 
 # 连接测试
 mailbox account test-connection --json

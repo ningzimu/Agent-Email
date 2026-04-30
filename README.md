@@ -74,10 +74,11 @@ mailbox --help
 # list accounts
 mailbox account list --json
 
-# list unread emails (cache by default)
+# list unread emails (cache by default; --from filters cache-side)
 mailbox email list --unread-only --limit 20 --json
+mailbox email list --account-id my_account_id --from "newsletter" --json
 
-# show one email
+# show one email (response includes list_unsubscribe when the header is set)
 mailbox email show 123456 --account-id my_account_id --json
 
 # mark read (use --dry-run to validate first)
@@ -86,6 +87,11 @@ mailbox email mark 123456 --read --account-id my_account_id --folder INBOX --con
 
 # delete
 mailbox email delete 123456 --account-id my_account_id --folder INBOX --confirm --json
+
+# bulk mutate by sender or subject (no UID list needed)
+mailbox email mark --from "support@npmjs.com" --read --confirm --account-id my_account_id --json
+mailbox email delete --from "newsletter" --account-id my_account_id --json    # dry-run preview
+mailbox email delete --subject "[ad]" --account-id my_account_id --confirm --json
 ```
 
 ### Cache + sync
