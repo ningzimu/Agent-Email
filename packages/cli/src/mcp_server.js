@@ -116,7 +116,7 @@ function buildServer() {
 
   server.registerTool("email_show", {
     title: "Read one or more emails",
-    description: "Fetch the body of one or more emails over a single IMAP connection. Each id can be a bare UID + account_id, or a global gid in the form 'account_id:uid'. AI-friendly defaults: HTML excluded, body capped at 2000 chars, URLs stripped, and HTML-only mail is auto-converted to a text body (body_source='html_derived'). Pass full=true to opt back to raw HTML + uncapped body + URLs.",
+    description: "Fetch the body of one or more emails over a single IMAP connection. Each id can be a bare UID + account_id, or a global gid 'account_id:folder:uid' (legacy 'account_id:uid' still works). With a 3-part gid (as returned by email_list/email_search) the folder is auto-resolved, so you don't need to pass folder. AI-friendly defaults: HTML excluded, body capped at 2000 chars, URLs stripped, and HTML-only mail is auto-converted to a text body (body_source='html_derived'). Pass full=true to opt back to raw HTML + uncapped body + URLs.",
     inputSchema: {
       ids: z.array(z.string()).min(1).describe("UIDs or gids."),
       account_id: accountIdOpt,
@@ -128,11 +128,15 @@ function buildServer() {
       html_max_len: z.number().int().min(-1).max(500000).optional().describe("0 = strip HTML, -1 = unlimited, >0 = cap at N chars."),
     },
   }, async (args) => {
-    // Resolve gids
+    // Resolve gids: 3-part account_id:folder:uid (preferred) or legacy account_id:uid.
     const refs = args.ids.map((s) => {
-      const idx = s.lastIndexOf(":");
-      if (idx > 0 && /^\d+$/.test(s.slice(idx + 1))) return { id: s.slice(idx + 1), account_id: s.slice(0, idx) };
-      return { id: s, account_id: "" };
+      const parts = String(s).split(":");
+      if (parts.length >= 3 && parts[0] && /^\d+$/.test(parts[parts.length - 1])) {
+        return { id: parts[parts.length - 1], account_id: parts[0], folder: parts.slice(1, -1).join(":") };
+      }
+      const idx = String(s).lastIndexOf(":");
+      if (idx > 0 && /^\d+$/.test(String(s).slice(idx + 1))) return { id: String(s).slice(idx + 1), account_id: String(s).slice(0, idx), folder: "" };
+      return { id: String(s), account_id: "", folder: "" };
     });
     let resolvedAccount = args.account_id || "";
     const fromGids = new Set(refs.map((r) => r.account_id).filter(Boolean));
@@ -141,16 +145,20 @@ function buildServer() {
       return _toolResult({ success: false, error: `Mixed account_ids in gids (${[...fromGids].join(", ")}); pass account_id explicitly`, error_code: "ambiguous_account" });
     }
     const ids = refs.map((r) => r.id);
-    const opts = {
-      folder: args.folder || "INBOX",
+    const explicitFolder = args.folder || "";
+    const baseOpts = {
       account_id: resolvedAccount,
       body_max_len: args.body_max_len != null ? args.body_max_len : (args.full ? 0 : 2000),
       html_max_len: args.html_max_len != null ? args.html_max_len : (args.full ? -1 : 0),
       include_html: args.include_html != null ? args.include_html : Boolean(args.full),
       strip_urls: args.strip_urls != null ? args.strip_urls : !args.full,
     };
-    if (ids.length === 1) return _toolResult(await email.showEmail({ email_id: ids[0], ...opts }), false);
-    return _toolResult(await email.showEmails({ email_ids: ids, ...opts }), false);
+    if (ids.length === 1) {
+      const folder = await email.resolveEmailFolder({ account_id: resolvedAccount, uid: ids[0], folder: explicitFolder || refs[0].folder });
+      return _toolResult(await email.showEmail({ email_id: ids[0], folder, ...baseOpts }), false);
+    }
+    if (explicitFolder) return _toolResult(await email.showEmails({ email_ids: ids, folder: explicitFolder, ...baseOpts }), false);
+    return _toolResult(await email.showEmailsResolved({ refs: refs.map((r) => ({ id: r.id, folder: r.folder })), ...baseOpts }), false);
   });
 
   server.registerTool("email_folders", {

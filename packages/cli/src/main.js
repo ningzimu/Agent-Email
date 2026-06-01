@@ -156,15 +156,19 @@ const MAX_RESULT_LIMIT = Number(process.env.MAILBOX_MAX_LIMIT || 1000);
 // ref. Caller should fall back to --account-id when account_id is empty.
 function _parseEmailRef(raw) {
   const s = String(raw || "").trim();
-  if (!s) return { id: "", account_id: "" };
-  const idx = s.lastIndexOf(":");
-  // Only treat as gid when the right side is all digits and the left side
-  // is non-empty — preserves bare-UID inputs and tolerates accounts that
-  // happen to contain colons (none in practice but defensive).
-  if (idx > 0 && /^\d+$/.test(s.slice(idx + 1))) {
-    return { id: s.slice(idx + 1), account_id: s.slice(0, idx) };
+  if (!s) return { id: "", account_id: "", folder: "" };
+  const parts = s.split(":");
+  // 3-part self-describing gid: account_id:folder:uid (folder may itself contain
+  // ':' — rejoin the middle segments). account_id is the first segment.
+  if (parts.length >= 3 && parts[0] && /^\d+$/.test(parts[parts.length - 1])) {
+    return { id: parts[parts.length - 1], account_id: parts[0], folder: parts.slice(1, -1).join(":") };
   }
-  return { id: s, account_id: "" };
+  // Legacy 2-part gid: account_id:uid.
+  const idx = s.lastIndexOf(":");
+  if (idx > 0 && /^\d+$/.test(s.slice(idx + 1))) {
+    return { id: s.slice(idx + 1), account_id: s.slice(0, idx), folder: "" };
+  }
+  return { id: s, account_id: "", folder: "" };
 }
 
 // Resolve a list of input refs (gid or bare uid) plus an explicit
@@ -179,9 +183,13 @@ function _resolveEmailRefs(rawIds, explicitAccountId) {
   const fromGids = new Set(refs.map((r) => r.account_id).filter(Boolean));
   if (!resolved && fromGids.size === 1) resolved = [...fromGids][0];
   else if (!resolved && fromGids.size > 1) {
-    return { ids: [], accountId: "", error: `Mixed account_ids in gids (${[...fromGids].join(", ")}); pass --account-id explicitly` };
+    return { ids: [], accountId: "", refs: [], error: `Mixed account_ids in gids (${[...fromGids].join(", ")}); pass --account-id explicitly` };
   }
-  return { ids: refs.map((r) => r.id), accountId: resolved };
+  return {
+    ids: refs.map((r) => r.id),
+    accountId: resolved,
+    refs: refs.map((r) => ({ id: r.id, folder: r.folder || "" })),
+  };
 }
 
 function _emailIdArgs(rawIds) {
@@ -750,7 +758,7 @@ async function main(argv) {
     .description("Show one or more emails (AI-friendly defaults: text only, body capped, URLs stripped — pass --full for raw)")
     .argument("<email_ids...>")
     .option("--account-id <id>")
-    .option("--folder <name>", "Folder", "INBOX")
+    .option("--folder <name>", "Folder (default: auto-resolve from the gid/cache, else INBOX)")
     .option("--full", "Return full HTML + uncapped body + URLs (overrides AI-friendly defaults)")
     .option("--preview", "Return a very short body preview (400 chars body, 2000 chars HTML)")
     .option("--body-max-len <n>", "Max body length (characters)")
@@ -782,8 +790,8 @@ async function main(argv) {
         process.exit(rc);
       }
       const ids = refs.ids;
+      const explicitFolder = opts.folder; // undefined unless the user passed --folder
       const baseOpts = {
-        folder: opts.folder,
         account_id: refs.accountId,
         body_max_len: bodyMax,
         html_max_len: htmlMax,
@@ -791,12 +799,18 @@ async function main(argv) {
         strip_urls: stripUrls,
       };
       if (ids.length === 1) {
-        const result = await email.showEmail({ email_id: ids[0], ...baseOpts });
+        // Resolve folder: explicit --folder > gid folder > cache > INBOX.
+        const folderHint = explicitFolder || (refs.refs[0] && refs.refs[0].folder) || "";
+        const folder = await email.resolveEmailFolder({ account_id: refs.accountId, uid: ids[0], folder: folderHint });
+        const result = await email.showEmail({ email_id: ids[0], folder, ...baseOpts });
         const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email show") });
         process.exit(rc);
       }
-      // Batch: reuse one IMAP connection across all IDs
-      const result = await email.showEmails({ email_ids: ids, ...baseOpts });
+      // Batch: an explicit --folder applies to all; otherwise resolve each id's
+      // folder from its gid/cache so results that span folders just work.
+      const result = explicitFolder
+        ? await email.showEmails({ email_ids: ids, folder: explicitFolder, ...baseOpts })
+        : await email.showEmailsResolved({ refs: refs.refs, ...baseOpts });
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email show") });
       process.exit(rc);
     });

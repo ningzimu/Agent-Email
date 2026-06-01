@@ -37,6 +37,13 @@ function _normalizeFolder(folder) {
   return f;
 }
 
+// Self-describing global id: account_id:folder:uid. The folder segment lets
+// `show` open the right mailbox without the caller passing --folder. Parsing is
+// backward-compatible with the legacy 2-part account_id:uid form.
+function _gid(accountId, folder, uid) {
+  return `${accountId}:${folder || "INBOX"}:${uid}`;
+}
+
 // imapflow's client.list() returns Promise<Array> in current versions but has
 // historically been documented as async-iterable. Tolerate both shapes.
 async function _listMailboxes(client) {
@@ -170,7 +177,7 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
       const item = {
         id: String(msg.uid),
         uid: String(msg.uid),
-        gid: `${account.id}:${msg.uid}`,
+        gid: _gid(account.id, openFolder, msg.uid),
         message_id: env.messageId || "",
         subject: env.subject || "",
         from: firstAddress(env.from),
@@ -554,7 +561,7 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
           const item = {
             id: String(msg.uid),
             uid: String(msg.uid),
-            gid: `${acc.id}:${msg.uid}`,
+            gid: _gid(acc.id, folderPath, msg.uid),
             subject: env.subject || "",
             from: firstAddress(env.from),
             to: firstAddress(env.to),
@@ -841,7 +848,7 @@ async function showEmail({
       return {
         success: true,
         id: String(raw.uid),
-        gid: `${acc.account.id}:${raw.uid}`,
+        gid: _gid(acc.account.id, openFolder, raw.uid),
         requested_id: String(id),
         from: raw.from,
         to: raw.to,
@@ -888,7 +895,7 @@ async function showEmail({
     return {
       success: true,
       id: String(msg.uid),
-      gid: `${acc.account.id}:${msg.uid}`,
+      gid: _gid(acc.account.id, openFolder, msg.uid),
       requested_id: String(id),
       from: parsed.from ? parsed.from.text || "" : firstAddress(msg.envelope && msg.envelope.from),
       to: parsed.to ? parsed.to.text || "" : firstAddress(msg.envelope && msg.envelope.to),
@@ -969,7 +976,8 @@ async function showEmails({
         });
         emails.push({
           id: String(msg.uid),
-          gid: `${acc.account.id}:${msg.uid}`,
+          gid: _gid(acc.account.id, openFolder, msg.uid),
+          folder: openFolder,
           from: parsed.from ? parsed.from.text || "" : firstAddress(msg.envelope && msg.envelope.from),
           to: parsed.to ? parsed.to.text || "" : firstAddress(msg.envelope && msg.envelope.to),
           cc: parsed.cc ? parsed.cc.text || "" : "",
@@ -1001,6 +1009,75 @@ async function showEmails({
       account_id: acc.account.id,
     };
   });
+}
+
+// Resolve which folder an email lives in: an explicit folder wins, otherwise the
+// local cache is consulted, otherwise INBOX. Lets `show` open the right mailbox
+// without the caller remembering each email's folder.
+async function resolveEmailFolder({ account_id = "", uid = "", folder = "" } = {}) {
+  if (folder) return _normalizeFolder(folder);
+  const acc = accounts.getAccountByIdOrEmail(account_id);
+  const accId = acc && acc.success ? acc.account.id : account_id;
+  let dbPath = "";
+  try {
+    dbPath = paths.getPathConfig().emailSyncDb;
+  } catch {
+    dbPath = "";
+  }
+  if (dbPath && uid) {
+    try {
+      const f = await require("../storage/sync_db").lookupFolderForUid({ dbPath, accountId: accId, uid: String(uid) });
+      if (f) return f;
+    } catch {
+      /* ignore */
+    }
+  }
+  return "INBOX";
+}
+
+// Folder-aware batch show. refs: [{ id, folder }]. A ref's folder may come from a
+// 3-part gid; when absent it is resolved from the local cache, then falls back to
+// INBOX. Ids are grouped by folder and each folder is fetched via showEmails, so
+// `show` works on results that span folders (e.g. after `search --folder all`)
+// without the caller passing --folder per email.
+async function showEmailsResolved({ refs = [], account_id = "", ...opts } = {}) {
+  const list = (Array.isArray(refs) ? refs : [])
+    .map((r) => ({ id: String((r && r.id) || "").trim(), folder: (r && r.folder) || "" }))
+    .filter((r) => r.id);
+  if (!list.length) return { success: false, error: "Missing email refs" };
+
+  const acc = accounts.getAccountByIdOrEmail(account_id);
+  if (!acc.success) return acc;
+
+  // Resolve a folder for every ref (gid folder -> cache -> INBOX), then group.
+  const byFolder = new Map();
+  for (const r of list) {
+    // eslint-disable-next-line no-await-in-loop
+    const folder = await resolveEmailFolder({ account_id: acc.account.id, uid: r.id, folder: r.folder });
+    if (!byFolder.has(folder)) byFolder.set(folder, []);
+    byFolder.get(folder).push(r.id);
+  }
+
+  const emails = [];
+  const failed_ids = [];
+  for (const [folder, ids] of byFolder) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await showEmails({ email_ids: ids, folder, account_id, ...opts });
+    if (res && res.success === false && !Array.isArray(res.emails)) {
+      return res; // hard error (e.g. account/folder open failure)
+    }
+    if (res && Array.isArray(res.emails)) emails.push(...res.emails);
+    if (res && Array.isArray(res.failed_ids)) failed_ids.push(...res.failed_ids);
+  }
+
+  return {
+    success: failed_ids.length === 0,
+    emails,
+    failed_ids,
+    requested: list.length,
+    returned: emails.length,
+    account_id: acc.account.id,
+  };
 }
 
 async function markEmails({ email_ids, mark_as, folder = "INBOX", account_id = "", dry_run = false } = {}) {
@@ -1740,7 +1817,7 @@ async function watchFolder({ account_id, folder = "INBOX", filter = {}, onEvent 
             const item = {
               id: String(uidNum),
               uid: String(uidNum),
-              gid: `${acc.account.id}:${uidNum}`,
+              gid: _gid(acc.account.id, folder, uidNum),
               message_id: env.messageId || "",
               subject: env.subject || "",
               from: firstAddress(env.from),
@@ -1808,6 +1885,8 @@ module.exports = {
   searchEmails,
   showEmail,
   showEmails,
+  showEmailsResolved,
+  resolveEmailFolder,
   watchFolder,
   markEmails,
   deleteEmails,

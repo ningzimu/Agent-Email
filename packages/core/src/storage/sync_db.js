@@ -399,7 +399,7 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
     const emails = rows.map((row) => ({
       id: String(row.id),
       uid: String(row.uid),
-      gid: `${row.account_id || ""}:${row.uid}`,
+      gid: `${row.account_id || ""}:${row.folder || "INBOX"}:${row.uid}`,
       message_id: row.message_id || "",
       subject: row.subject || "No Subject",
       from: row.from || "",
@@ -566,8 +566,38 @@ async function getEmailUIDsFromCache({ dbPath, accountId, folder }) {
   }
 }
 
+// Reverse lookup: which folder does this (account, uid) live in, per the cache.
+// Returns the folder name or "" when unknown. Used to make `show` folder-aware
+// without the caller having to remember each email's folder.
+async function lookupFolderForUid({ dbPath, accountId, uid }) {
+  if (!dbPath || !fs.existsSync(dbPath)) return "";
+  const u = String(uid || "").trim();
+  if (!u) return "";
+  const h = await openSyncDb(dbPath);
+  try {
+    const row = _execRows(
+      h.db,
+      `
+        SELECT CASE WHEN e.folder_id IS NULL THEN 'INBOX' ELSE f.name END as folder
+        FROM emails e
+        LEFT JOIN folders f ON e.folder_id = f.id
+        WHERE e.account_id = ? AND e.uid = ?
+        ORDER BY e.updated_at DESC
+        LIMIT 1
+      `,
+      [String(accountId || ""), u]
+    )[0];
+    return row && row.folder ? String(row.folder) : "";
+  } catch {
+    return "";
+  } finally {
+    try { h.close(); } catch { /* ignore */ }
+  }
+}
+
 module.exports = {
   listEmailsFromCache,
+  lookupFolderForUid,
   upsertAccount,
   upsertFolder,
   upsertEmails,
