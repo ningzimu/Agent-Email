@@ -142,8 +142,11 @@ Files: `cli/src/main.js`, `core/src/services/email.js`
 - `_filteredDryRunResult` adds a `groups` breakdown:
   `[{ account_id, folder, count, sample: [top-3 subjects] }]`, shown before confirm; per-group
   counts also in the applied summary.
-- `--folder <name...>` (variadic) / `--all-folders` on `delete`/`mark`; targets keyed by
-  `account_id + folder`; mutate per `(account, folder)`. Keep the >100-match `--confirm` guard.
+- `--all-folders` on `delete`/`mark` (the variadic `--folder <name...>` form was dropped as
+  YAGNI); targets keyed by `account_id + folder`; mutate per `(account, folder)`. Keep the
+  >100-match `--confirm` guard. **Safety (added post-review):** `--all-folders` skips
+  special-use folders (Sent/Drafts/Junk/Trash) unless `--include-special`; skipped folders are
+  surfaced in the dry-run/applied output.
 
 ### WP-G — Categorizer + cleanup plan
 Files: `workflows/src/workflows/classify.js` (new), `workflows/src/workflows/inbox.js`,
@@ -168,6 +171,15 @@ A → F → D → B → C → H → I → E → G. A/F/D/B establish the per-ema
 (presentation) and G (cleanup uses classify + WP-E machinery) build on. WPs share `main.js`
 and `email.js` heavily, so they are sequenced (not parallel-edited) to avoid conflicts. Each
 WP is committed independently with its tests.
+
+## Post-review hardening
+
+An adversarial multi-agent review of the branch caught real bugs from extending the gid to
+3 parts: the MCP `_resolveRefs` and all mutate handlers (mark/delete/flag/move), plus the CLI
+mark/delete id-paths, are now folder-aware (group by the gid's folder; explicit `--folder`
+still overrides). `showEmailsResolved` degrades a single unopenable folder to `failed_ids`
+instead of aborting the batch; `lookupFolderForUid` prefers INBOX on a cross-folder uid
+collision; `--format jsonl` emits 0 lines for an empty list. See commit `fix(review): ...`.
 
 ## Out of scope (this pass)
 
