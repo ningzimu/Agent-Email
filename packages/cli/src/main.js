@@ -506,6 +506,20 @@ function _resolveCliVersion() {
   const env = process.env.MAILBOX_CLI_VERSION || process.env.MAILBOX_VERSION || "";
   if (env && typeof env === "string" && env.trim()) return env.trim();
 
+  // Version baked into the binary at release-build time (see _version.js). pkg
+  // bundles this statically-required module, so the compiled binary reports the
+  // real version even though it can't read package.json at runtime. Skipped when
+  // still the "0.0.0" default (dev / unstamped) so we fall through to package.json.
+  try {
+    // eslint-disable-next-line global-require
+    const baked = require("./_version.js");
+    if (baked && typeof baked === "string" && baked.trim() && baked.trim() !== "0.0.0") {
+      return baked.trim();
+    }
+  } catch {
+    // ignore — fall through to package.json
+  }
+
   const candidates = [
     path.join(__dirname, "..", "package.json"),
     path.join(__dirname, "..", "..", "package.json"),

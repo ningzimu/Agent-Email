@@ -41,11 +41,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      # NOTE: do not run scripts/set_release_version.js here — it rewrites the
-      # mailbox-cli/packages/* versions, which breaks `pnpm install --frozen-lockfile`
-      # inside build:binary (ERR_PNPM_OUTDATED_LOCKFILE), and those files aren't what
-      # the binary reads for --version anyway. `mailbox --version` reporting 0.0.0 is a
-      # known cosmetic gap tracked separately.
+      # Bake the real version into the binary via packages/cli/src/_version.js.
+      # NOTE: do NOT use scripts/set_release_version.js here — it rewrites the
+      # mailbox-cli/packages/* versions and breaks `pnpm install --frozen-lockfile`
+      # inside build:binary. _version.js is a plain JS module (not a package.json),
+      # so stamping it has no lockfile impact and pkg bundles it statically.
+      - name: Bake CLI version (for `mailbox --version`)
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          case "$v" in
+            [0-9]*) printf 'module.exports = "%s";\n' "$v" > packages/cli/src/_version.js
+                    echo "baked version $v" ;;
+            *) echo "ref '$GITHUB_REF_NAME' is not a vX.Y.Z tag; leaving default" ;;
+          esac
+
       - name: Build mailbox binary
         run: pnpm build:binary
 
