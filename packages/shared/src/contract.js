@@ -70,8 +70,13 @@ function compactEmail(e) {
   if (typeof e.has_attachments === "boolean") hasAttachments = e.has_attachments;
   else if (e.real_attachment_count != null) hasAttachments = Number(e.real_attachment_count) > 0;
   else if (e.attachment_count != null) hasAttachments = Number(e.attachment_count) > 0;
+  const id = e.id != null ? String(e.id) : "";
+  // gid lets an agent chain straight into `email show` from compact output.
+  // Prefer the carried 3-part gid; otherwise synthesize account_id:folder:uid.
+  const gid = e.gid || (e.account_id && id ? `${e.account_id}:${e.folder || "INBOX"}:${id}` : id);
   return {
-    id: e.id != null ? String(e.id) : "",
+    id,
+    gid,
     account_id: e.account_id || "",
     folder: e.folder || "",
     date: e.date || "",

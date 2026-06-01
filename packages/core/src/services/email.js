@@ -483,6 +483,26 @@ function _deadlineExceeded(started, timeoutMs, now) {
   return (Number(now != null ? now : Date.now()) - Number(started)) >= t;
 }
 
+// HARD wall-clock bound: resolve with `promise`'s value, or `onTimeout()` if it
+// doesn't settle within `ms`. The cooperative _deadlineExceeded checks only fire
+// BETWEEN imap operations; a single slow op (e.g. a QQ/163 client-side scan of a
+// whole INBOX, or a stuck connect) can block past the deadline. This guarantees
+// searchEmails returns even then. The orphaned op is harmless for the one-shot
+// CLI (process.exit cleans up); the daemon closes the connection on its own.
+// `promise` rejections pass through so existing try/catch handling still runs.
+function _raceTimeout(promise, ms, onTimeout) {
+  if (!(ms > 0)) return promise;
+  let timer;
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), ms);
+    if (timer && typeof timer.unref === "function") timer.unref();
+  });
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    guard,
+  ]);
+}
+
 async function searchEmails({ query, from = "", subject = "", account_id = "", date_from = "", date_to = "", limit = 50, offset = 0, unread_only = false, folder = "all", preview_chars = 0, timeout_ms = 0 } = {}) {
   const previewChars = Math.max(0, Number(preview_chars || 0));
   const timeoutMs = Math.max(0, Number(timeout_ms || 0));
@@ -640,6 +660,7 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
 
       const emails = [];
       let matched = 0;
+      let folderTimedOut = false;
       const wantPreview = previewChars > 0;
       if (slice.length > 0) {
         for await (const msg of client.fetch(
@@ -647,6 +668,13 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
           { envelope: true, flags: true, internalDate: true, bodyStructure: true, source: wantPreview },
           { uid: true }
         )) {
+          // Cooperative bound: a broken-search provider (QQ/163) may stream
+          // thousands of envelopes to filter client-side. Stop at the deadline
+          // and return what we have rather than scanning the whole mailbox.
+          if (_deadlineExceeded(started, timeoutMs)) {
+            folderTimedOut = true;
+            break;
+          }
           const env = msg.envelope || {};
           if (!matchesClient(env)) continue;
           matched += 1;
@@ -687,6 +715,7 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
       }
       const totalReported = usedClientFilter ? matched : total;
       const out = { total_found: totalReported, emails };
+      if (folderTimedOut) out.timed_out = true;
       if (usedClientFilter) out.client_filter = { fetched: slice.length, mailbox_total: mailboxTotal };
       return out;
     } finally {
@@ -706,8 +735,7 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
       continue;
     }
     try {
-      // eslint-disable-next-line no-await-in-loop
-      const r = await withImapClient(acc, async (client) => {
+      const accountWork = withImapClient(acc, async (client) => {
         const folderPaths = scanAll
           ? _selectableFoldersFor(await _listMailboxes(client))
           : [openFolder];
@@ -727,6 +755,7 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
             const part = await _searchOneFolder(client, acc, fp);
             totalCombined += part.total_found;
             emailsCombined.push(...part.emails);
+            if (part.timed_out) timed_out = true;
           } catch (fe) {
             folderErrors.push({ folder: fp, error: fe && fe.message ? fe.message : "search failed" });
           }
@@ -735,6 +764,16 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
         const out = { success: true, total_found: totalCombined, emails: emailsCombined };
         if (folderErrors.length) out.folder_errors = folderErrors;
         return out;
+      });
+      // Hard-bound the account by whatever time remains in the overall deadline,
+      // so a single un-cooperative imap op (QQ/163 scan / stuck connect) can't
+      // blow past --timeout. On timeout we keep the partial emails gathered so far.
+      const remaining = timeoutMs > 0 ? Math.max(0, started + timeoutMs - Date.now()) : 0;
+      // eslint-disable-next-line no-await-in-loop
+      const r = await _raceTimeout(accountWork, remaining, () => {
+        timed_out = true;
+        pending_accounts.push(acc.id || acc.email || "");
+        return { success: true, total_found: 0, emails: [], account_timed_out: true };
       });
       perAccount.push({ account: acc, ...r });
     } catch (e) {
@@ -2015,6 +2054,7 @@ module.exports = {
   _parseDateInput,
   _expandRelativeDate,
   _deadlineExceeded,
+  _raceTimeout,
   watchFolder,
   markEmails,
   deleteEmails,

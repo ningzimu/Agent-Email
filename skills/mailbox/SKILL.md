@@ -102,10 +102,10 @@ mailbox email recent --since 3d --json
 mailbox email search --from amazon --subject review --folder all --json
 mailbox email search --query "interview"  --since 2w --json    # relative dates: 2d/3w/1mo/today/yesterday
 
-# ⚠️ search --folder all over ALL accounts can be slow (QQ/163 do client-side scans of every
-# folder). It is bounded by --timeout (default 60s): past it you get partial results +
-# timed_out:true + pending_accounts. For speed/reliability, scope it: pass --account-id and/or
-# --folder INBOX, or raise --timeout deliberately. Prefer a narrow search before a broad one.
+# ⚠️ search over QQ/163 (broken IMAP SEARCH) does a client-side scan of the folder and can be
+# slow. --timeout (default 60s) is a HARD wall-clock bound — even a single stuck QQ/163 scan
+# returns by then with partial results + timed_out:true (+ pending_accounts). Still prefer to
+# scope it (--account-id and/or --folder INBOX) and use a short --timeout for snappy results.
 mailbox email search --query inv --account-id <id> --folder INBOX --limit 20 --json   # fast, scoped
 
 # NOTE: on QQ/163/126/sina/aliyun/outlook, IMAP TEXT search is broken,
@@ -180,7 +180,7 @@ mailbox <cmd> --help --json   # structured help: { name, description, options, a
 
 ## Token-saving tips
 
-- **`--format compact` (global flag)** projects each email to just `{id, account_id, folder, date, from, subject, unread, has_attachments, body_text_preview}` — the lightest useful shape for scanning. `--format jsonl` emits one JSON object per line (composable: `--format compact,jsonl`). `agent` is an alias of `compact`.
+- **`--format compact` (global flag)** projects each email to just `{id, gid, account_id, folder, date, from, subject, unread, has_attachments, body_text_preview}` — the lightest useful shape for scanning, and it includes the 3-part `gid` so you can chain straight into `email show <gid>`. `--format jsonl` emits one JSON object per line (composable: `--format compact,jsonl`). `agent` is an alias of `compact`.
 - **`--lean` (global flag, before subcommand)** strips ~10 noisy/duplicate top-level fields and per-email duplicates. Typical response shrinks by ~30%.
 - **`--with-preview <N>`** on `email list / email search` fetches a body snippet alongside the envelope — saves one `email show` per email.
 - **Batch `email show <gid1> <gid2> ...`** reuses one IMAP connection (and spans folders). Use it whenever you need ≥2 emails.

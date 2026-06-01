@@ -14,6 +14,7 @@ function mailboxBin() {
 
 const COMPACT_KEYS = [
   "id",
+  "gid",
   "account_id",
   "folder",
   "date",
@@ -42,6 +43,8 @@ describe("WP-C: --format compact / jsonl", () => {
     expect(payload.emails.length).toBeGreaterThan(0);
     for (const e of payload.emails) {
       expect(Object.keys(e).sort()).toEqual([...COMPACT_KEYS].sort());
+      // gid is the 3-part account:folder:uid so the agent can chain to `email show`.
+      expect(e.gid).toBe(`${e.account_id}:${e.folder}:${e.id}`);
     }
     // Heavy top-level metadata is dropped.
     expect(payload).not.toHaveProperty("accounts_info");

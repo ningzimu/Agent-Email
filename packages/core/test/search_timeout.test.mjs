@@ -39,6 +39,16 @@ describe("WP review-fix: search deadline", () => {
     expect(email._deadlineExceeded(1000, 50, 5000)).toBe(true);
   });
 
+  it("_raceTimeout hard-bounds a never-settling op and passes through a fast one", async () => {
+    // A stuck op (never resolves) → onTimeout wins within ~ms.
+    const stuck = new Promise(() => {});
+    expect(await email._raceTimeout(stuck, 15, () => "TIMED_OUT")).toBe("TIMED_OUT");
+    // A fast op resolves before the (long) timer.
+    expect(await email._raceTimeout(Promise.resolve("OK"), 1000, () => "TIMED_OUT")).toBe("OK");
+    // 0 = no bound → returns the promise's value.
+    expect(await email._raceTimeout(Promise.resolve("OK"), 0, () => "TIMED_OUT")).toBe("OK");
+  });
+
   it("normal search with a generous timeout is unaffected (timed_out false)", async () => {
     const r = await email.searchEmails({ query: "hello", account_id: "mock_acc", folder: "all", limit: 10, timeout_ms: 60000 });
     expect(r.success).toBe(true);
