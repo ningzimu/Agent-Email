@@ -6,7 +6,7 @@ const { paths } = require("@mailbox/shared");
 const accounts = require("./accounts");
 const { withImapClient } = require("./imap");
 const { sendMail } = require("./smtp");
-const { formatDateTime, firstAddress, hasAttachmentsFromBodyStructure, formatSize } = require("./format");
+const { formatDateTime, firstAddress, hasAttachmentsFromBodyStructure, attachmentFlags, formatSize } = require("./format");
 const syncDb = require("../storage/sync_db");
 
 function _isTestMode() {
@@ -827,6 +827,7 @@ async function showEmail({
         filename: a.filename,
         size: a.content ? a.content.length : 0,
         content_type: a.contentType || "application/octet-stream",
+        ...attachmentFlags(a),
       }));
       const unread = !(raw.flags || new Set([])).has("\\Seen");
       const composed = _composeBody({
@@ -851,6 +852,8 @@ async function showEmail({
         has_html: Boolean(raw.html),
         attachments,
         attachment_count: attachments.length,
+        real_attachment_count: attachments.filter((x) => x.is_real_attachment).length,
+        has_attachments: attachments.some((x) => x.is_real_attachment),
         unread,
         message_id: raw.messageId || "",
         in_reply_to: raw.inReplyTo || "",
@@ -870,6 +873,7 @@ async function showEmail({
       filename: a.filename || "",
       size: a.size || 0,
       content_type: a.contentType || "application/octet-stream",
+      ...attachmentFlags(a),
     }));
 
     const composed = _composeBody({
@@ -895,6 +899,8 @@ async function showEmail({
       has_html: Boolean(parsed.html),
       attachments,
       attachment_count: attachments.length,
+      real_attachment_count: attachments.filter((x) => x.is_real_attachment).length,
+      has_attachments: attachments.some((x) => x.is_real_attachment),
       unread,
       message_id: parsed.messageId || (msg.envelope ? msg.envelope.messageId : ""),
       in_reply_to: parsed.inReplyTo || "",
@@ -951,6 +957,7 @@ async function showEmails({
           filename: a.filename || "",
           size: a.size || 0,
           content_type: a.contentType || "application/octet-stream",
+          ...attachmentFlags(a),
         }));
         const composed = _composeBody({
           text: parsed.text,
@@ -972,6 +979,8 @@ async function showEmails({
           has_html: Boolean(parsed.html),
           attachments,
           attachment_count: attachments.length,
+          real_attachment_count: attachments.filter((x) => x.is_real_attachment).length,
+          has_attachments: attachments.some((x) => x.is_real_attachment),
           unread: !flags.has("\\Seen"),
           message_id: parsed.messageId || (msg.envelope ? msg.envelope.messageId : ""),
           in_reply_to: parsed.inReplyTo || "",
@@ -1473,12 +1482,14 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
         size_formatted: formatSize(content.length),
         content_type: a.contentType,
         saved_path: dest,
+        ...attachmentFlags(a),
       });
     }
     return {
       success: true,
       attachments,
       attachment_count: attachments.length,
+      real_attachment_count: attachments.filter((x) => x.is_real_attachment).length,
       email_id: String(email_id),
       folder: _normalizeFolder(folder),
       account: acc.account.email,
@@ -1521,6 +1532,7 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
         size_formatted: formatSize(content.length),
         content_type: a.contentType || "application/octet-stream",
         saved_path: dest,
+        ...attachmentFlags(a),
       });
     }
 
@@ -1528,6 +1540,7 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
       success: true,
       attachments,
       attachment_count: attachments.length,
+      real_attachment_count: attachments.filter((x) => x.is_real_attachment).length,
       email_id: String(email_id),
       folder: openFolder,
       account: acc.account.email,
