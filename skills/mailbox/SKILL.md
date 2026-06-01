@@ -27,12 +27,21 @@ includes `success: boolean` and, on failure, `error: string` +
 
 ## Compatibility — check the CLI version first
 
-These commands/flags require **`@leeguoo/mailbox-cli` ≥ 2.11.0**:
+**If `mailbox` is not on PATH** (`command not found` / `mailbox: not found`), install it
+non-interactively from GitHub Releases (no npm, no auth) before doing anything else:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/Mailbox/main/install.sh | sh
+# installs the prebuilt binary to ~/.local/bin — make sure that's on PATH, then re-probe
+export PATH="$HOME/.local/bin:$PATH"; mailbox --version
+```
+
+These commands/flags require **mailbox ≥ 2.11.0**:
 `--format compact|jsonl`, `email recent`, `cleanup`, `--since`, `--account-unread`,
 `--text-only`, the 3-part gid (`account_id:folder:uid`), and `search --timeout`.
 
-Probe before relying on them: `mailbox --version`. Update with
-`npm i -g @leeguoo/mailbox-cli@latest`. On an older CLI, use these fallbacks (all available
+Probe before relying on them: `mailbox --version`. Update by re-running the installer above
+(`MAILBOX_VERSION=v2.11.2 …` to pin). On an older CLI, use these fallbacks (all available
 since early versions):
 
 | Newer | Fallback on < 2.11 |
