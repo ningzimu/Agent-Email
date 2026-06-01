@@ -136,6 +136,7 @@ describe("filter batch operations contract", () => {
       unread_only: undefined,
       folder: "INBOX",
       limit: 1000,
+      timeout_ms: 60000,
     });
     expect(email.deleteEmails).toHaveBeenCalledTimes(1);
     expect(email.deleteEmails).toHaveBeenCalledWith(

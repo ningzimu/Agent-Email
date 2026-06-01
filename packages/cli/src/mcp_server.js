@@ -88,7 +88,7 @@ function buildServer() {
 
   server.registerTool("email_search", {
     title: "Search emails by from/subject/text/date",
-    description: "Cross-account, cross-folder search. Pass at least one of query/from/subject/date_from/date_to/unread_only. For Gmail accounts the search uses X-GM-RAW (same engine as the web UI). For QQ/163/126/sina/outlook (broken IMAP SEARCH), automatically falls back to client-side envelope filtering.",
+    description: "Cross-account, cross-folder search. Pass at least one of query/from/subject/date_from/date_to/unread_only. For Gmail accounts the search uses X-GM-RAW (same engine as the web UI). For QQ/163/126/sina/outlook (broken IMAP SEARCH), automatically falls back to client-side envelope filtering. Bounded by timeout_ms (default 60s) — past it returns partial results with timed_out=true; narrow with account_id/folder for speed.",
     inputSchema: {
       query: z.string().optional().describe("Free text. Matches body+headers (Gmail X-GM-RAW; client-side fallback for broken-search providers)."),
       from: z.string().optional().describe("Substring match against sender."),
@@ -101,6 +101,7 @@ function buildServer() {
       offset: offsetOpt,
       unread_only: z.boolean().optional(),
       with_preview: z.number().int().min(1).max(2000).optional(),
+      timeout_ms: z.number().int().min(0).max(600000).optional().describe("Overall search deadline in ms (default 60000; 0 = no limit). Past it returns partial results + timed_out=true."),
     },
   }, async (args) => _toolResult(await email.searchEmails({
     query: args.query || "",
@@ -114,6 +115,7 @@ function buildServer() {
     offset: args.offset || 0,
     unread_only: Boolean(args.unread_only),
     preview_chars: args.with_preview || 0,
+    timeout_ms: args.timeout_ms != null ? args.timeout_ms : 60000,
   })));
 
   server.registerTool("email_show", {

@@ -282,6 +282,7 @@ async function _searchFilteredEmailTargets(opts) {
     unread_only: opts.unreadOnly,
     folder: searchFolder,
     limit: 1000,
+    timeout_ms: 60000, // bound cross-folder filter scans so a mutation can't hang forever
   });
   if (!result || !result.success) return { result, targets: [], groups: new Map(), skipped_special_folders: [] };
   let targets = (result.emails || []).filter((e) => String(e.uid || e.id || "").trim());
@@ -598,13 +599,22 @@ function _commandToJson(cmd) {
 }
 function _findCommandPath(program, argv) {
   let cur = program;
+  let unknown = null;
   for (const tok of argv) {
     if (tok.startsWith("-")) break;
     const next = (cur.commands || []).find((c) => c.name() === tok);
-    if (!next) break;
-    cur = next;
+    if (next) {
+      cur = next;
+      continue;
+    }
+    // No subcommand matched. If the current command expects subcommands, this
+    // token is an unknown COMMAND (e.g. `bogus --help`); otherwise it's a
+    // positional argument (e.g. `email show 101 --help`) and we stop here.
+    const expectsSub = (cur.commands || []).some((c) => c.name() !== "help");
+    if (expectsSub) unknown = tok;
+    break;
   }
-  return cur;
+  return { cmd: cur, unknown };
 }
 
 async function main(argv) {
@@ -854,6 +864,7 @@ async function main(argv) {
     .option("--unread-only")
     .option("--folder <name>", "Folder", "all")
     .option("--with-preview <n>", "Also fetch a body preview of N chars per email (one extra IMAP fetch, capped at 50 emails)")
+    .option("--timeout <s>", "Overall search deadline in seconds; returns partial results + timed_out=true past it (0 = no limit)", "60")
     .action(async (opts) => {
       if (opts.since && !opts.dateFrom) opts.dateFrom = opts.since; // --since is sugar for --date-from
       if (!opts.query && !opts.from && !opts.subject && !opts.dateFrom && !opts.dateTo && !opts.unreadOnly) {
@@ -892,6 +903,7 @@ async function main(argv) {
         unread_only: Boolean(opts.unreadOnly),
         folder: opts.folder,
         preview_chars: previewChars,
+        timeout_ms: Math.max(0, Number(opts.timeout || 0)) * 1000,
       });
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: _printEmailList });
       process.exit(rc);
@@ -1748,7 +1760,19 @@ async function main(argv) {
   // instead of letting commander print human text and exit.
   if (asJson && parsed.argv.some((a) => a === "--help" || a === "-h")) {
     const argvNoHelp = parsed.argv.filter((a) => a !== "--help" && a !== "-h");
-    const cmd = _findCommandPath(program, argvNoHelp);
+    const { cmd, unknown } = _findCommandPath(program, argvNoHelp);
+    if (unknown) {
+      // Don't let `<unknown-cmd> --help --json` falsely report success — that
+      // misleads an agent into thinking the command exists.
+      const result = {
+        success: false,
+        error: `Unknown command: ${unknown}`,
+        error_code: "invalid_argument",
+        help: _commandToJson(cmd),
+      };
+      contract.handleJsonOrText({ result, asJson, pretty, printText: () => {} });
+      return 2;
+    }
     const result = { success: true, help: _commandToJson(cmd) };
     contract.handleJsonOrText({ result, asJson, pretty, printText: () => {} });
     return 0;

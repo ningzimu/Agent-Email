@@ -475,8 +475,17 @@ async function listEmails({
   return out;
 }
 
-async function searchEmails({ query, from = "", subject = "", account_id = "", date_from = "", date_to = "", limit = 50, offset = 0, unread_only = false, folder = "all", preview_chars = 0 } = {}) {
+// Pure deadline predicate (extracted so the timeout logic is unit-testable
+// without timing flakiness). timeoutMs <= 0 means "no deadline".
+function _deadlineExceeded(started, timeoutMs, now) {
+  const t = Number(timeoutMs || 0);
+  if (!(t > 0)) return false;
+  return (Number(now != null ? now : Date.now()) - Number(started)) >= t;
+}
+
+async function searchEmails({ query, from = "", subject = "", account_id = "", date_from = "", date_to = "", limit = 50, offset = 0, unread_only = false, folder = "all", preview_chars = 0, timeout_ms = 0 } = {}) {
   const previewChars = Math.max(0, Number(preview_chars || 0));
+  const timeoutMs = Math.max(0, Number(timeout_ms || 0));
   const q = String(query || "").trim();
   const fromQ = String(from || "").trim();
   const subjQ = String(subject || "").trim();
@@ -685,7 +694,17 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
     }
   }
 
+  let timed_out = false;
+  const pending_accounts = [];
   for (const acc of targets) {
+    // Bound the whole search: a cross-account / --folder all scan over slow
+    // (client-side-filtered) providers could otherwise run unbounded. On
+    // timeout we stop scanning and return whatever we have so far.
+    if (_deadlineExceeded(started, timeoutMs)) {
+      timed_out = true;
+      pending_accounts.push(acc.id || acc.email || "");
+      continue;
+    }
     try {
       // eslint-disable-next-line no-await-in-loop
       const r = await withImapClient(acc, async (client) => {
@@ -698,6 +717,11 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
         const emailsCombined = [];
         const folderErrors = [];
         for (const fp of folderPaths) {
+          if (_deadlineExceeded(started, timeoutMs)) {
+            timed_out = true;
+            folderErrors.push({ folder: fp, error: "skipped: search timed out" });
+            break;
+          }
           try {
             // eslint-disable-next-line no-await-in-loop
             const part = await _searchOneFolder(client, acc, fp);
@@ -739,6 +763,8 @@ async function searchEmails({ query, from = "", subject = "", account_id = "", d
     accounts_searched: accounts_count,
     accounts_info: [],
     search_time,
+    timed_out,
+    ...(timed_out ? { pending_accounts, timeout_ms: timeoutMs, timed_out_note: `Search exceeded ${timeoutMs}ms and returned partial results; narrow with --account-id / --folder INBOX or raise --timeout` } : {}),
     search_params: { query: q, date_from, date_to, unread_only: unreadOnly, folder },
     failed_accounts,
     failed_searches: [],
@@ -1988,6 +2014,7 @@ module.exports = {
   resolveEmailFolder,
   _parseDateInput,
   _expandRelativeDate,
+  _deadlineExceeded,
   watchFolder,
   markEmails,
   deleteEmails,

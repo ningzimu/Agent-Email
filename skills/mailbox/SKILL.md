@@ -3,7 +3,7 @@ name: mailbox
 description: Read, search, send, and manage email across Gmail, QQ, 163, Outlook and any IMAP/SMTP account from the command line. Use when the user asks to "read my email", "查邮件", "look up an Amazon order email", "find the customer review notification", "send an email", "回复邮件", "delete spam", "查未读", "show unread", "synchronize my mailbox", "set up MCP for email", or anything that involves listing / searching / reading / writing / classifying messages from one or more mailboxes.
 metadata:
   author: leeguooooo
-  version: "0.2.1"
+  version: "0.2.2"
   homepage: https://github.com/leeguooooo/Mailbox
 keywords:
   - mailbox
@@ -24,6 +24,27 @@ Drives the `@leeguoo/mailbox-cli` Node CLI to read and manage email across
 multiple IMAP accounts. Returns a stable JSON contract — every response
 includes `success: boolean` and, on failure, `error: string` +
 `error_code: string` (machine-readable).
+
+## Compatibility — check the CLI version first
+
+These commands/flags require **`@leeguoo/mailbox-cli` ≥ 2.11.0**:
+`--format compact|jsonl`, `email recent`, `cleanup`, `--since`, `--account-unread`,
+`--text-only`, the 3-part gid (`account_id:folder:uid`), and `search --timeout`.
+
+Probe before relying on them: `mailbox --version`. Update with
+`npm i -g @leeguoo/mailbox-cli@latest`. On an older CLI, use these fallbacks (all available
+since early versions):
+
+| Newer | Fallback on < 2.11 |
+|---|---|
+| `--format compact` | `--lean` (drops noise; doesn't pin the exact field set) |
+| `email recent` | `email list` with no `--account-id` (already spans all accounts) |
+| `--since 7d` | `--date-from 7d` |
+| `--text-only` | `--no-html` |
+| `cleanup` | classify in-agent from `email list` output |
+
+To tell whether a command exists, probe `mailbox <cmd> --help --json` and check
+`success` — an unknown command returns `success:false` / `error_code:"invalid_argument"`.
 
 ## Setup (one time, by the user)
 
@@ -70,6 +91,12 @@ mailbox email recent --since 3d --json
 # Search (server-side IMAP for Gmail; client-side fallback for QQ/163/Outlook):
 mailbox email search --from amazon --subject review --folder all --json
 mailbox email search --query "interview"  --since 2w --json    # relative dates: 2d/3w/1mo/today/yesterday
+
+# ⚠️ search --folder all over ALL accounts can be slow (QQ/163 do client-side scans of every
+# folder). It is bounded by --timeout (default 60s): past it you get partial results +
+# timed_out:true + pending_accounts. For speed/reliability, scope it: pass --account-id and/or
+# --folder INBOX, or raise --timeout deliberately. Prefer a narrow search before a broad one.
+mailbox email search --query inv --account-id <id> --folder INBOX --limit 20 --json   # fast, scoped
 
 # NOTE: on QQ/163/126/sina/aliyun/outlook, IMAP TEXT search is broken,
 # so the CLI falls back to envelope-only client-side filtering. That
