@@ -60,7 +60,7 @@ function buildServer() {
 
   server.registerTool("email_list", {
     title: "List recent emails",
-    description: "List emails from one or all accounts. Reads the local SQLite cache when warm (~165ms); pass live=true to hit IMAP. Pass with_preview to also fetch a body snippet of N chars per email in the same round-trip — saves an email_show call per result.",
+    description: "List emails from one or all accounts. Reads the local SQLite cache when warm (~165ms); pass live=true to hit IMAP. Pass with_preview to also fetch a body snippet of N chars per email in the same round-trip — saves an email_show call per result. Unread is reported as three distinct fields: unread_in_result (unread among returned rows — always trustworthy), folder_unread (server count for this folder), and account_unread_total (null unless include_account_unread=true). unread_as_of marks snapshot freshness.",
     inputSchema: {
       account_id: accountIdOpt,
       folder: folderOpt,
@@ -71,6 +71,7 @@ function buildServer() {
       date_to: dateRel,
       live: z.boolean().optional().describe("Force live IMAP (skip cache)."),
       with_preview: z.number().int().min(1).max(2000).optional().describe("If set, fetch a plain-text body preview of N chars per email."),
+      include_account_unread: z.boolean().optional().describe("Also compute account_unread_total (unread across all folders)."),
     },
   }, async (args) => _toolResult(await email.listEmails({
     account_id: args.account_id || "",
@@ -82,6 +83,7 @@ function buildServer() {
     date_to: args.date_to || "",
     use_cache: !args.live,
     preview_chars: args.with_preview || 0,
+    include_account_unread: Boolean(args.include_account_unread),
   })));
 
   server.registerTool("email_search", {

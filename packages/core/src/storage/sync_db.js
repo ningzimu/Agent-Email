@@ -323,7 +323,7 @@ function _placeholders(values) {
   return values.map(() => "?").join(", ");
 }
 
-async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limit, offset, dateFrom, dateTo, from }) {
+async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limit, offset, dateFrom, dateTo, from, includeAccountUnread = false }) {
   if (!dbPath || !fs.existsSync(dbPath)) return null;
 
   const h = await openSyncDb(dbPath);
@@ -425,24 +425,44 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
     // would need a join we'd rather not pay for in the hot path).
     let total_in_folder = cached_emails;
     let unread_count = cached_unread;
+    let unread_as_of = null;
+    const folderName = (resolvedFolder === "all") ? "INBOX" : resolvedFolder;
     if (accountId) {
-      const folderName = (resolvedFolder === "all") ? "INBOX" : resolvedFolder;
-      const row = _execRows(h.db, "SELECT message_count, unread_count FROM folders WHERE account_id = ? AND name = ?", [String(accountId), folderName])[0];
+      const row = _execRows(h.db, "SELECT message_count, unread_count, last_sync FROM folders WHERE account_id = ? AND name = ?", [String(accountId), folderName])[0];
       if (row) {
         // Important: 0 is a real value here (server reports zero unread).
         // Use explicit null-checks instead of `||` so we don't fall back
         // to the cached subset count.
         if (row.message_count != null) total_in_folder = Number(row.message_count);
         if (row.unread_count != null) unread_count = Number(row.unread_count);
+        if (row.last_sync != null) unread_as_of = String(row.last_sync);
       }
     } else {
       // Cross-account: aggregate folders.unread_count + folders.message_count
       // for the requested folder name across every account that has synced.
-      const folderName = (resolvedFolder === "all") ? "INBOX" : resolvedFolder;
-      const aggRow = _execRows(h.db, "SELECT SUM(message_count) AS total, SUM(unread_count) AS unread FROM folders WHERE name = ?", [folderName])[0];
+      // COALESCE the unread sum so an invalidated (NULL) snapshot on one
+      // account doesn't drop the count for its siblings.
+      const aggRow = _execRows(h.db, "SELECT SUM(message_count) AS total, SUM(COALESCE(unread_count, 0)) AS unread, MAX(last_sync) AS as_of FROM folders WHERE name = ?", [folderName])[0];
       if (aggRow && aggRow.total != null) {
         total_in_folder = Number(aggRow.total);
         unread_count = aggRow.unread != null ? Number(aggRow.unread) : 0;
+        if (aggRow.as_of != null) unread_as_of = String(aggRow.as_of);
+      }
+    }
+
+    // Unread among the rows actually returned — always trustworthy, unlike the
+    // server snapshot which can be stale relative to the cached rows.
+    const unread_in_result = emails.filter((e) => e.unread).length;
+
+    // Optional: unread across ALL synced folders for the scope (cheap in cache).
+    let account_unread_total = null;
+    if (includeAccountUnread) {
+      if (accountId) {
+        const r = _execScalar(h.db, "SELECT SUM(COALESCE(unread_count, 0)) FROM folders WHERE account_id = ?", [String(accountId)]);
+        account_unread_total = Number(r || 0);
+      } else {
+        const r = _execScalar(h.db, "SELECT SUM(COALESCE(unread_count, 0)) FROM folders");
+        account_unread_total = Number(r || 0);
       }
     }
 
@@ -451,6 +471,10 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       emails,
       total_in_folder,
       unread_count,
+      folder_unread: unread_count,
+      unread_in_result,
+      account_unread_total,
+      unread_as_of,
       cached_emails,
       cached_unread,
       offset: Number(offset),

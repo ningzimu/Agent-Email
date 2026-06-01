@@ -122,7 +122,7 @@ function _parseDateInput(raw, { end = false } = {}) {
   return { date: d, sql };
 }
 
-async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOnly, since, before, previewChars = 0, includeServerUids = false }) {
+async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOnly, since, before, previewChars = 0, includeServerUids = false, includeAccountUnread = false }) {
   const openFolder = _normalizeFolder(folder);
   return withImapClient(account, async (client) => {
     const st = await client.mailboxOpen(openFolder);
@@ -203,11 +203,32 @@ async function _fetchEmailsForAccount({ account, folder, limit, offset, unreadOn
       emails.push(item);
     }
 
+    // Optional: unread across all selectable folders for this account. One cheap
+    // STATUS UNSEEN per folder; opt-in because it adds a round-trip per folder.
+    let account_unread_total = null;
+    if (includeAccountUnread) {
+      try {
+        const mailboxes = await _listMailboxes(client);
+        const folders = _selectableFoldersFor(mailboxes);
+        let sum = 0;
+        for (const fpath of folders) {
+          // eslint-disable-next-line no-await-in-loop
+          const ss = await client.status(fpath, { unseen: true });
+          if (ss && ss.unseen != null) sum += Number(ss.unseen);
+        }
+        account_unread_total = sum;
+      } catch {
+        account_unread_total = null;
+      }
+    }
+
     const result = {
       success: true,
       emails,
       total_in_folder: Number(st.exists || 0),
       unread_count: unseenCount,
+      folder_unread: unseenCount,
+      account_unread_total,
       ...(unseenStatusError ? { unread_count_unavailable: true, unread_count_error: unseenStatusError } : {}),
       fetched: emails.length,
       folder: openFolder,
@@ -232,10 +253,12 @@ async function listEmails({
   preview_chars = 0,
   from = "",
   include_server_uids = false,
+  include_account_unread = false,
 } = {}) {
   const previewChars = Math.max(0, Number(preview_chars || 0));
   const fromFilter = String(from || "").trim();
   const includeServerUids = Boolean(include_server_uids);
+  const includeAccountUnread = Boolean(include_account_unread);
   // The cache backend returns envelope-only rows; preview requires live IMAP.
   if (previewChars > 0) use_cache = false;
   const lim = Math.max(0, Number(limit || 0));
@@ -265,6 +288,7 @@ async function listEmails({
         dateFrom: sqlFrom,
         dateTo: sqlTo,
         from: fromFilter,
+        includeAccountUnread,
       });
       if (cache && cache.success) {
         // Add multi-account metadata similar to Python contract.
@@ -290,7 +314,7 @@ async function listEmails({
   if (account_id) {
     const acc = accounts.getAccountByIdOrEmail(account_id);
     if (!acc.success) return acc;
-    const r = await _fetchEmailsForAccount({ account: acc.account, folder, limit: lim, offset: off, unreadOnly, since, before, previewChars, includeServerUids });
+    const r = await _fetchEmailsForAccount({ account: acc.account, folder, limit: lim, offset: off, unreadOnly, since, before, previewChars, includeServerUids, includeAccountUnread });
     if (!r.success) return r;
     results.push({ account: acc.account, ...r });
   } else {
@@ -304,6 +328,10 @@ async function listEmails({
         emails: [],
         total_in_folder: 0,
         unread_count: 0,
+        folder_unread: 0,
+        unread_in_result: 0,
+        account_unread_total: null,
+        unread_as_of: null,
         total_emails: 0,
         total_unread: 0,
         accounts_count: 0,
@@ -327,6 +355,7 @@ async function listEmails({
           before,
           previewChars,
           includeServerUids,
+          includeAccountUnread,
         });
         results.push({ account: acc, ...r });
       } catch (e) {
@@ -367,12 +396,22 @@ async function listEmails({
 
   const total_in_folder = ok.reduce((sum, r) => sum + Number(r.total_in_folder || 0), 0);
   const unread_count = ok.reduce((sum, r) => sum + Number(r.unread_count || 0), 0);
+  const unread_in_result = emails.filter((e) => e.unread).length;
+  // account_unread_total is null unless opted in; sum the per-account totals.
+  const accountTotals = ok.map((r) => r.account_unread_total).filter((v) => v != null);
+  const account_unread_total = includeAccountUnread && accountTotals.length
+    ? accountTotals.reduce((s, v) => s + Number(v || 0), 0)
+    : null;
 
   const out = {
     success: ok.length === results.length,
     emails,
     total_in_folder,
     unread_count,
+    folder_unread: unread_count,
+    unread_in_result,
+    account_unread_total,
+    unread_as_of: null, // live counts are current
     total_emails: total_in_folder,
     total_unread: unread_count,
     accounts_count: results.length,

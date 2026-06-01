@@ -82,6 +82,16 @@ class MockImapClient {
     };
   }
 
+  async status(name, opts) {
+    const mb = getMailbox(this._account.id, name);
+    if (!mb) throw new Error(`Mailbox not found: ${name}`);
+    const messages = mb.messages || [];
+    const out = { path: name };
+    if (opts && opts.unseen) out.unseen = messages.filter((m) => !m.flags.has("\\Seen")).length;
+    if (opts && opts.messages) out.messages = messages.length;
+    return out;
+  }
+
   async search(query, options) {
     const mb = getMailbox(this._account.id, this._mailbox);
     if (!mb) throw new Error(`Mailbox not found: ${this._mailbox}`);

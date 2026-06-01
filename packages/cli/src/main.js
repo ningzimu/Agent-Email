@@ -652,6 +652,7 @@ async function main(argv) {
     .option("--date-to <s>", "Filter to date (YYYY-MM-DD or ISO)")
     .option("--folder <name>", "Folder (currently only INBOX is supported here; use 'email search' for cross-folder)", "INBOX")
     .option("--with-preview <n>", "Also fetch a body preview of N chars per email (one extra IMAP fetch, capped at 50 emails)")
+    .option("--account-unread", "Also compute account_unread_total (unread across all folders; one STATUS per folder on live)")
     .option("--live", "Force live IMAP (no cache)")
     .action(async (opts) => {
       const paging = _validatePaging(opts.limit, opts.offset, { defaultLimit: 100 });
@@ -681,6 +682,7 @@ async function main(argv) {
         date_to: dateToExpanded,
         use_cache: !Boolean(opts.live),
         preview_chars: previewChars,
+        include_account_unread: Boolean(opts.accountUnread),
       });
       // Add contract parity fields.
       result.limit = paging.limit;
