@@ -21,7 +21,26 @@ function printJson(value, pretty) {
   }
 }
 
+// Write a list of records as JSON Lines (one compact JSON object per line).
+// Uses the same blocking-write strategy as printJson to survive process.exit().
+function printJsonl(records) {
+  const list = Array.isArray(records) ? records : [records];
+  const text = list.map((r) => JSON.stringify(r)).join("\n") + (list.length ? "\n" : "");
+  const buf = Buffer.from(text);
+  let offset = 0;
+  while (offset < buf.length) {
+    try {
+      offset += fs.writeSync(1, buf, offset, buf.length - offset);
+    } catch (e) {
+      if (e && (e.code === "EAGAIN" || e.code === "EWOULDBLOCK")) continue;
+      if (e && e.code === "EPIPE") return;
+      throw e;
+    }
+  }
+}
+
 module.exports = {
   printJson,
+  printJsonl,
   safeJsonStringify,
 };

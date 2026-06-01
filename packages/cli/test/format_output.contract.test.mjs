@@ -1,0 +1,107 @@
+import { describe, expect, it } from "vitest";
+import { execa } from "execa";
+import path from "node:path";
+import fs from "node:fs";
+
+import { defaultAuth, testEnv, writeAuthJson } from "./_helpers.mjs";
+
+function tmpRoot(name) {
+  return path.join(import.meta.dirname, ".tmp", name);
+}
+function mailboxBin() {
+  return path.join(import.meta.dirname, "..", "bin", "mailbox.js");
+}
+
+const COMPACT_KEYS = [
+  "id",
+  "account_id",
+  "folder",
+  "date",
+  "from",
+  "subject",
+  "unread",
+  "has_attachments",
+  "body_text_preview",
+];
+
+describe("WP-C: --format compact / jsonl", () => {
+  it("email list --format compact projects each email to exactly the agent fields", async () => {
+    const root = tmpRoot("fmt_compact");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "list", "--folder", "INBOX", "--account-id", "mock_acc", "--live", "--format", "compact"],
+      { reject: false, env }
+    );
+    expect(r.exitCode).toBe(0);
+    const payload = JSON.parse(r.stdout);
+    expect(Array.isArray(payload.emails)).toBe(true);
+    expect(payload.emails.length).toBeGreaterThan(0);
+    for (const e of payload.emails) {
+      expect(Object.keys(e).sort()).toEqual([...COMPACT_KEYS].sort());
+    }
+    // Heavy top-level metadata is dropped.
+    expect(payload).not.toHaveProperty("accounts_info");
+  });
+
+  it("email list --format jsonl emits one JSON object per line", async () => {
+    const root = tmpRoot("fmt_jsonl");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "list", "--folder", "INBOX", "--account-id", "mock_acc", "--live", "--format", "jsonl"],
+      { reject: false, env }
+    );
+    expect(r.exitCode).toBe(0);
+    const lines = r.stdout.trim().split("\n").filter(Boolean);
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) {
+      const obj = JSON.parse(line); // each line is valid JSON
+      expect(obj).toHaveProperty("id");
+      expect(obj).toHaveProperty("subject");
+    }
+  });
+
+  it("compact + jsonl compose: projected fields, one per line", async () => {
+    const root = tmpRoot("fmt_compact_jsonl");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "list", "--folder", "INBOX", "--account-id", "mock_acc", "--live", "--format", "compact,jsonl"],
+      { reject: false, env }
+    );
+    expect(r.exitCode).toBe(0);
+    const lines = r.stdout.trim().split("\n").filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    const obj = JSON.parse(lines[0]);
+    expect(Object.keys(obj).sort()).toEqual([...COMPACT_KEYS].sort());
+  });
+
+  it("single email show --format compact projects to agent fields + success", async () => {
+    const root = tmpRoot("fmt_show_compact");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "show", "102", "--folder", "INBOX", "--account-id", "mock_acc", "--format", "compact"],
+      { reject: false, env }
+    );
+    expect(r.exitCode).toBe(0);
+    const payload = JSON.parse(r.stdout);
+    expect(payload.success).toBe(true);
+    for (const k of COMPACT_KEYS) expect(payload).toHaveProperty(k);
+    // The heavy body/html fields are gone in compact form.
+    expect(payload).not.toHaveProperty("html_body");
+  });
+});

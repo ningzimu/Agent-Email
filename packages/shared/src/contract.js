@@ -1,4 +1,4 @@
-const { printJson } = require("./json");
+const { printJson, printJsonl } = require("./json");
 
 function parseGlobalFlags(argv) {
   const rest = [];
@@ -6,8 +6,10 @@ function parseGlobalFlags(argv) {
   let pretty = false;
   let forceText = false;
   let lean = false;
+  let format = "";
 
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
     if (arg === "--json") {
       asJson = true;
       continue;
@@ -24,10 +26,96 @@ function parseGlobalFlags(argv) {
       lean = true;
       continue;
     }
+    // --format <mode> or --format=<mode>. Modes are comma-separable, e.g.
+    // "compact,jsonl". Accepted: json, jsonl/ndjson, compact/agent.
+    if (arg === "--format") {
+      format = argv[i + 1] || "";
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--format=")) {
+      format = arg.slice("--format=".length);
+      continue;
+    }
     rest.push(arg);
   }
 
-  return { asJson, pretty, forceText, lean, argv: rest };
+  return { asJson, pretty, forceText, lean, format, argv: rest };
+}
+
+function parseFormatModes(format) {
+  const modes = new Set(
+    String(format || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return {
+    compact: modes.has("compact") || modes.has("agent"),
+    jsonl: modes.has("jsonl") || modes.has("ndjson"),
+    any: modes.size > 0,
+  };
+}
+
+// The exact agent-friendly per-email projection. body_text_preview is derived
+// from an existing preview (list/search --with-preview) or a truncated body
+// (show), so an agent gets a one-glance summary without a heavy payload.
+function compactEmail(e) {
+  if (!e || typeof e !== "object") return e;
+  let preview = "";
+  if (typeof e.body_text_preview === "string") preview = e.body_text_preview;
+  else if (typeof e.preview === "string") preview = e.preview;
+  else if (typeof e.body === "string") preview = e.body.replace(/\s+/g, " ").trim().slice(0, 200);
+  let hasAttachments = false;
+  if (typeof e.has_attachments === "boolean") hasAttachments = e.has_attachments;
+  else if (e.real_attachment_count != null) hasAttachments = Number(e.real_attachment_count) > 0;
+  else if (e.attachment_count != null) hasAttachments = Number(e.attachment_count) > 0;
+  return {
+    id: e.id != null ? String(e.id) : "",
+    account_id: e.account_id || "",
+    folder: e.folder || "",
+    date: e.date || "",
+    from: e.from || "",
+    subject: e.subject || "",
+    unread: Boolean(e.unread),
+    has_attachments: hasAttachments,
+    body_text_preview: preview,
+  };
+}
+
+// Pull the email-like records out of a result, tolerating both the list/search
+// shape ({ emails: [...] }) and the single-show shape (the email IS the result).
+function collectEmails(result) {
+  if (result && Array.isArray(result.emails)) return result.emails;
+  if (result && (result.id != null || result.subject != null) && result.success !== false) return [result];
+  return [];
+}
+
+const COMPACT_TOP_LEVEL_KEEP = new Set([
+  "success",
+  "error",
+  "error_code",
+  "failed_ids",
+  "limit",
+  "offset",
+  "returned",
+  "requested",
+  "unread_in_result",
+]);
+
+function compactResult(result) {
+  if (!result || typeof result !== "object") return result;
+  if (Array.isArray(result.emails)) {
+    const out = {};
+    for (const k of COMPACT_TOP_LEVEL_KEEP) if (k in result) out[k] = result[k];
+    out.emails = result.emails.map(compactEmail);
+    return out;
+  }
+  // Single-show shape: project the one email but keep success.
+  if (result.id != null || result.subject != null) {
+    return { success: result.success !== false, ...compactEmail(result) };
+  }
+  return result;
 }
 
 // Fields that are noise for an AI consumer of the JSON contract — they
@@ -134,11 +222,23 @@ function exitCodeForResult(result) {
   return r.success ? 0 : 1;
 }
 
-function handleJsonOrText({ result, asJson, pretty, lean, printText }) {
+function handleJsonOrText({ result, asJson, pretty, lean, format, printText }) {
   let normalized = ensureSuccessField(result);
   if (lean) normalized = leanResult(normalized);
 
-  if (asJson) {
+  const fmt = parseFormatModes(format);
+  if (fmt.compact) normalized = compactResult(normalized);
+
+  // Any --format mode implies structured output (no human text printer).
+  if (fmt.jsonl) {
+    // One email per line; on error or a non-email result fall back to a single
+    // JSON line so the output is still valid JSONL.
+    if (normalized && normalized.success === false) printJsonl([normalized]);
+    else {
+      const records = collectEmails(normalized);
+      printJsonl(records.length ? records : [normalized]);
+    }
+  } else if (asJson || fmt.compact) {
     printJson(normalized, pretty);
   } else if (typeof printText === "function") {
     printText(normalized);
@@ -168,6 +268,10 @@ function invalidUsage({ message, asJson, pretty }) {
 
 module.exports = {
   parseGlobalFlags,
+  parseFormatModes,
+  compactEmail,
+  compactResult,
+  collectEmails,
   ensureSuccessField,
   exitCodeForResult,
   handleJsonOrText,

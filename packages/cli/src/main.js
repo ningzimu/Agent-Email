@@ -525,6 +525,7 @@ async function main(argv) {
   const pretty = parsed.pretty;
   const forceText = parsed.forceText;
   const lean = parsed.lean;
+  const format = parsed.format;
   // Default to JSON when stdout is piped (so scripts get parseable output);
   // --text overrides this for users who want the human-readable form even
   // when piping to less/grep.
@@ -532,11 +533,12 @@ async function main(argv) {
   else if (!asJson && !process.stdout.isTTY) asJson = true;
   // Monkeypatch: every action calls contract.handleJsonOrText with its own
   // {result, asJson, pretty, printText} bag. Wrap the function so we don't
-  // have to thread `lean` through every callsite — when set, it slims the
-  // result before printing.
+  // have to thread `lean` / `format` through every callsite — when set, they
+  // slim/reshape the result before printing.
   const originalHandle = contract.handleJsonOrText;
-  if (lean) {
-    contract.handleJsonOrText = (args) => originalHandle({ ...args, lean: true });
+  if (lean || format) {
+    contract.handleJsonOrText = (args) =>
+      originalHandle({ ...args, ...(lean ? { lean: true } : {}), ...(format ? { format } : {}) });
   }
 
   const program = new Command();
