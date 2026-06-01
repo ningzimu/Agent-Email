@@ -58,7 +58,10 @@ jobs:
             echo "new_release_published=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Trigger publish-npm (fallback when no RELEASE_TOKEN)
+      # Distribution is GitHub Releases (binaries), not the npm registry — no
+      # NPM_TOKEN / 2FA needed. release-binaries builds the per-platform binaries
+      # and attaches them to the GitHub Release for this tag.
+      - name: Trigger release-binaries (GitHub Releases distribution)
         if: steps.release.outputs.new_release_published == 'true' && env.HAS_PAT != 'true'
         env:
           HAS_PAT: ${{ secrets.RELEASE_TOKEN != '' }}
@@ -66,5 +69,5 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.release.outputs.new_release_version }}"
-          echo "Dispatching publish-npm for $version"
-          gh workflow run publish-npm.yml -f version="$version"
+          echo "Dispatching release-binaries for $version (GitHub Releases, not npm)"
+          gh workflow run release-binaries.yml --ref "$version"

@@ -41,6 +41,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Stamp release version (so `mailbox --version` is correct)
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME:-}"
+          case "$v" in
+            v[0-9]*) node scripts/set_release_version.js "$v" ;;
+            *) echo "ref '$v' is not a vX.Y.Z tag; skipping version stamp" ;;
+          esac
+
       - name: Build mailbox binary
         run: pnpm build:binary
 

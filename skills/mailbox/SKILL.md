@@ -49,8 +49,9 @@ To tell whether a command exists, probe `mailbox <cmd> --help --json` and check
 ## Setup (one time, by the user)
 
 ```bash
-# 1. Install the CLI globally from npm:
-npm install -g @leeguoo/mailbox-cli
+# 1. Install the CLI from GitHub Releases (no npm/Node needed; prebuilt binary):
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/Mailbox/main/install.sh | sh
+#    (npm is deprecated: `npm install -g @leeguoo/mailbox-cli` may lag the releases)
 
 # 2. Configure accounts (edit credentials):
 mkdir -p ~/.config/mailbox

@@ -15,14 +15,25 @@ prebuilt platform binaries via npm (no Python required for end users).
 
 ## Install
 
-### npm (recommended)
+### From GitHub Releases (recommended — no npm, no Node)
 
 ```bash
-npm install -g @leeguoo/mailbox-cli
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/Mailbox/main/install.sh | sh
 mailbox --help
 ```
 
-The npm package ships prebuilt binaries per platform (no Python required).
+Downloads the prebuilt binary for your platform (macOS arm64/x64, Linux x64) from the
+[latest GitHub Release](https://github.com/leeguooooo/Mailbox/releases/latest), verifies its
+checksum, and installs to `~/.local/bin`. Pin a version with `MAILBOX_VERSION=v2.11.2`, or
+change the dir with `MAILBOX_INSTALL_DIR=...`.
+
+### npm (deprecated)
+
+```bash
+npm install -g @leeguoo/mailbox-cli   # may lag the GitHub Releases; prefer the installer above
+```
+
+The npm registry is no longer the primary channel — releases ship as GitHub Release binaries.
 
 ### As an AI Skill (Claude Code / Cursor / etc.)
 
@@ -34,7 +45,7 @@ npx skills add leeguooooo/Mailbox --skill mailbox
 npx skills add leeguooooo/Mailbox --skill mailbox -g
 ```
 
-The skill assumes the CLI is on `PATH` (`npm install -g @leeguoo/mailbox-cli`).
+The skill assumes the CLI is on `PATH` (install via the `curl … install.sh | sh` above).
 For the biggest speedup also run `mailbox daemon install` once.
 
 ### MCP server (Claude Desktop / Code / Cursor)
