@@ -650,13 +650,15 @@ async function main(argv) {
     .option("--unread-only", "Only unread")
     .option("--account-id <id>", "Account id/email")
     .option("--from <addr>", "Filter by sender (substring, cache-side)")
-    .option("--date-from <s>", "Filter from date (YYYY-MM-DD or ISO)")
+    .option("--date-from <s>", "Filter from date (YYYY-MM-DD, ISO, or relative 7d/24h/today)")
+    .option("--since <s>", "Alias of --date-from (e.g. --since 7d, --since today)")
     .option("--date-to <s>", "Filter to date (YYYY-MM-DD or ISO)")
     .option("--folder <name>", "Folder (currently only INBOX is supported here; use 'email search' for cross-folder)", "INBOX")
     .option("--with-preview <n>", "Also fetch a body preview of N chars per email (one extra IMAP fetch, capped at 50 emails)")
     .option("--account-unread", "Also compute account_unread_total (unread across all folders; one STATUS per folder on live)")
     .option("--live", "Force live IMAP (no cache)")
     .action(async (opts) => {
+      if (opts.since && !opts.dateFrom) opts.dateFrom = opts.since; // --since is sugar for --date-from
       const paging = _validatePaging(opts.limit, opts.offset, { defaultLimit: 100 });
       if (!paging.ok) {
         const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
@@ -708,7 +710,8 @@ async function main(argv) {
     .option("--from <s>", "Filter by sender (IMAP FROM, substring match)")
     .option("--subject <s>", "Filter by subject (IMAP SUBJECT, substring match)")
     .option("--account-id <id>")
-    .option("--date-from <s>")
+    .option("--date-from <s>", "Filter from date (YYYY-MM-DD, ISO, or relative 7d/24h/today)")
+    .option("--since <s>", "Alias of --date-from (e.g. --since 7d)")
     .option("--date-to <s>")
     .option("--limit <n>", "Limit", "50")
     .option("--offset <n>", "Offset", "0")
@@ -716,6 +719,7 @@ async function main(argv) {
     .option("--folder <name>", "Folder", "all")
     .option("--with-preview <n>", "Also fetch a body preview of N chars per email (one extra IMAP fetch, capped at 50 emails)")
     .action(async (opts) => {
+      if (opts.since && !opts.dateFrom) opts.dateFrom = opts.since; // --since is sugar for --date-from
       if (!opts.query && !opts.from && !opts.subject && !opts.dateFrom && !opts.dateTo && !opts.unreadOnly) {
         const rc = contract.invalidUsage({
           message: "Provide at least one of --query, --from, --subject, --date-from, --date-to, --unread-only",
