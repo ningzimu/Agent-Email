@@ -648,7 +648,7 @@ async function main(argv) {
     .option("--limit <n>", "Limit", "100")
     .option("--offset <n>", "Offset", "0")
     .option("--unread-only", "Only unread")
-    .option("--account-id <id>", "Account id/email")
+    .option("--account-id <id>", "Account id/email (omit to span ALL accounts, merged by date)")
     .option("--from <addr>", "Filter by sender (substring, cache-side)")
     .option("--date-from <s>", "Filter from date (YYYY-MM-DD, ISO, or relative 7d/24h/today)")
     .option("--since <s>", "Alias of --date-from (e.g. --since 7d, --since today)")
@@ -659,6 +659,14 @@ async function main(argv) {
     .option("--live", "Force live IMAP (no cache)")
     .action(async (opts) => {
       if (opts.since && !opts.dateFrom) opts.dateFrom = opts.since; // --since is sugar for --date-from
+      // 'email list' is INBOX-only by design; warn instead of silently collapsing
+      // a cross-folder request so the user knows to reach for 'email search'.
+      if (opts.folder && String(opts.folder).toLowerCase() !== "inbox") {
+        process.stderr.write(
+          `mailbox: 'email list' is INBOX-only; folder "${opts.folder}" was treated as INBOX. ` +
+            `Use 'email search --folder ${opts.folder}' for cross-folder.\n`
+        );
+      }
       const paging = _validatePaging(opts.limit, opts.offset, { defaultLimit: 100 });
       if (!paging.ok) {
         const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
@@ -699,6 +707,46 @@ async function main(argv) {
       if (opts.accountId) result.account_id = opts.accountId;
       if (opts.from) result.from = opts.from;
 
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: _printEmailList });
+      process.exit(rc);
+    });
+
+  emailCmd
+    .command("recent")
+    .description("Recent INBOX emails across ALL accounts, merged newest-first (alias of 'email list' with no --account-id)")
+    .option("--limit <n>", "Limit", "50")
+    .option("--since <s>", "Only emails since (e.g. 7d, today, YYYY-MM-DD)")
+    .option("--account-id <id>", "Restrict to one account (default: all accounts)")
+    .option("--account-unread", "Also compute account_unread_total (unread across all folders)")
+    .option("--live", "Force live IMAP (no cache)")
+    .action(async (opts) => {
+      const paging = _validatePaging(opts.limit, "0", { defaultLimit: 50 });
+      if (!paging.ok) {
+        const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
+        process.exit(rc);
+      }
+      let sinceExpanded = "";
+      if (opts.since) {
+        const v = _validateDateOpt("--since", opts.since);
+        if (!v.ok) {
+          const rc = contract.invalidUsage({ message: v.error, asJson, pretty });
+          process.exit(rc);
+        }
+        sinceExpanded = v.expanded || opts.since;
+      }
+      const result = await email.listEmails({
+        limit: paging.limit,
+        offset: 0,
+        folder: "INBOX",
+        account_id: opts.accountId || "",
+        date_from: sinceExpanded,
+        use_cache: !Boolean(opts.live),
+        include_account_unread: Boolean(opts.accountUnread),
+      });
+      result.command = "recent";
+      result.limit = paging.limit;
+      if (opts.since) result.since = opts.since;
+      if (opts.accountId) result.account_id = opts.accountId;
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: _printEmailList });
       process.exit(rc);
     });
