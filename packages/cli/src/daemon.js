@@ -19,7 +19,7 @@ const path = require("path");
 
 const core = require("@mailbox/core");
 const { ImapPool } = require("@mailbox/core/src/services/imap_pool");
-const { workflows, digest, monitor, inbox } = (() => {
+const { workflows, digest, monitor, inbox, cleanup } = (() => {
   try { return require("@mailbox/workflows"); } catch { return {}; }
 })();
 
@@ -41,7 +41,7 @@ function _resolveFn(fnName) {
     accounts: core.accounts,
     email: core.email,
     sync: core.sync,
-    digest, monitor, inbox,
+    digest, monitor, inbox, cleanup,
   };
   const obj = namespaces[ns];
   if (!obj) return null;

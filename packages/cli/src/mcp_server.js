@@ -12,7 +12,7 @@ const { z } = require("zod");
 const { contract } = require("@mailbox/shared");
 const { makeProxies } = require("./core_client");
 
-const { accounts, email, sync, digest, monitor, inbox } = makeProxies();
+const { accounts, email, sync, digest, monitor, inbox, cleanup } = makeProxies();
 
 // Common Zod fragments
 const accountIdOpt = z.string().min(1).optional().describe("Account id (e.g. 'leeguooooo_gmail') or email address. Pass either this OR a gid (account_id:uid) inline with email_id.");
@@ -342,6 +342,35 @@ function buildServer() {
       limit: args.limit || 15,
       unread_only: Boolean(args.unread_only),
     })));
+  }
+
+  if (typeof cleanup.plan === "function") {
+    server.registerTool("cleanup", {
+      title: "Classify emails and plan/apply a cleanup",
+      description: "Rule-based classifier into protected_finance/protected_travel/security/support_case (never deleted) vs marketing/routine_notification (cleanup candidates) vs unknown. Returns a plan by default (read-only). DESTRUCTIVE when confirm=true: deletes the marketing/routine_notification candidates (moved to trash unless permanent=true).",
+      inputSchema: {
+        account_id: accountIdOpt,
+        folder: folderOpt,
+        limit: limitOpt,
+        unread_only: z.boolean().optional(),
+        confirm: z.boolean().optional().describe("Apply the plan (delete candidates). Default false = plan only."),
+        permanent: z.boolean().optional().describe("Permanently delete instead of moving to trash."),
+        categories: z.array(z.enum(["marketing", "routine_notification"])).optional().describe("Which candidate categories to delete on confirm. Default both."),
+      },
+    }, async (args) => {
+      const base = {
+        account_id: args.account_id || "",
+        folder: args.folder || "INBOX",
+        limit: args.limit || 200,
+        unread_only: Boolean(args.unread_only),
+      };
+      if (!args.confirm) return _toolResult(await cleanup.plan(base), false);
+      return _toolResult(await cleanup.apply({
+        ...base,
+        categories: args.categories,
+        permanent: Boolean(args.permanent),
+      }), false);
+    });
   }
 
   if (typeof digest.run === "function") {

@@ -8,7 +8,7 @@ const { makeProxies } = require("./core_client");
 // daemon is running, requests are forwarded over a Unix socket so we
 // reuse pooled IMAP connections (1-3s saved per call). When no daemon
 // is around, the proxy falls back transparently to in-process execution.
-const { accounts, email, imap, smtp, sync, digest, monitor, inbox } = makeProxies();
+const { accounts, email, imap, smtp, sync, digest, monitor, inbox, cleanup } = makeProxies();
 
 function _printTextNotImplemented(label) {
   // Goes to stderr so it never corrupts a JSON pipe consumer.
@@ -219,7 +219,7 @@ function _groupTargets(emails, fallbackAccountId, fallbackFolder) {
     if (!uid) continue;
     const accountId = String(e.account_id || fallbackAccountId || "");
     const folder = String(e.folder || fallbackFolder || "INBOX");
-    const key = `${accountId} ${folder}`;
+    const key = `${accountId} ${folder}`;
     if (!groups.has(key)) groups.set(key, { accountId, folder, uids: [], sample: [] });
     const g = groups.get(key);
     g.uids.push(uid);
@@ -1340,6 +1340,54 @@ async function main(argv) {
     });
 
   // digest
+  program
+    .command("cleanup")
+    .description("Classify emails and propose a deletion plan (default: plan only; --confirm to delete marketing/routine candidates)")
+    .option("--account-id <id>", "Account id/email (omit to span all accounts)")
+    .option("--folder <name>", "Folder", "INBOX")
+    .option("--limit <n>", "Scan limit", "200")
+    .option("--unread-only", "Only classify unread emails")
+    .option("--categories <list>", "Comma-separated categories to delete on --confirm", "marketing,routine_notification")
+    .option("--permanent", "Permanently delete instead of moving to trash")
+    .option("--trash-folder <name>", "Trash folder", "Trash")
+    .option("--confirm", "Actually delete the candidate categories (default: plan only)")
+    .option("--dry-run")
+    .action(async (opts) => {
+      const paging = _validatePaging(opts.limit, "0", { defaultLimit: 200 });
+      if (!paging.ok) {
+        const rc = contract.invalidUsage({ message: paging.error, asJson, pretty });
+        return process.exit(rc);
+      }
+      const confirm = Boolean(opts.confirm) && !Boolean(opts.dryRun);
+      const base = {
+        account_id: opts.accountId || "",
+        folder: opts.folder,
+        limit: paging.limit,
+        unread_only: Boolean(opts.unreadOnly),
+      };
+      let result;
+      if (!confirm) {
+        result = await cleanup.plan(base);
+        if (result && typeof result === "object" && result.success) {
+          result.confirmation_required = true;
+          result.confirmation_hint = "Re-run with --confirm to delete the candidate categories";
+        }
+      } else {
+        const categories = String(opts.categories || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        result = await cleanup.apply({
+          ...base,
+          categories,
+          permanent: Boolean(opts.permanent),
+          trash_folder: opts.trashFolder,
+        });
+      }
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("cleanup") });
+      return process.exit(rc);
+    });
+
   const digestCmd = program.command("digest").description("Daily digest workflows");
   digestCmd
     .command("run")

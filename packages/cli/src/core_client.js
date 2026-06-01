@@ -157,6 +157,7 @@ const MUTATING_FNS = new Set([
   "digest.run",
   "monitor.run",
   "inbox.run",
+  "cleanup.apply",
 ]);
 
 function _wrapNamespace(nsName, realObj) {
@@ -210,6 +211,7 @@ function makeProxies() {
     digest: _wrapNamespace("digest", realWorkflows.digest || {}),
     monitor: _wrapNamespace("monitor", realWorkflows.monitor || {}),
     inbox: _wrapNamespace("inbox", realWorkflows.inbox || {}),
+    cleanup: _wrapNamespace("cleanup", realWorkflows.cleanup || {}),
   };
 }
 
