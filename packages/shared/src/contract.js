@@ -231,10 +231,13 @@ function handleJsonOrText({ result, asJson, pretty, lean, format, printText }) {
 
   // Any --format mode implies structured output (no human text printer).
   if (fmt.jsonl) {
-    // One email per line; on error or a non-email result fall back to a single
-    // JSON line so the output is still valid JSONL.
-    if (normalized && normalized.success === false) printJsonl([normalized]);
-    else {
+    // A list result (has an emails[] array) prints one email per line —
+    // including zero lines for an empty list and per-email lines for a partial
+    // (success:false) multi-account result. Only a genuinely non-list result
+    // (single show / a bare error with no emails[]) falls back to one line.
+    if (normalized && Array.isArray(normalized.emails)) {
+      printJsonl(normalized.emails);
+    } else {
       const records = collectEmails(normalized);
       printJsonl(records.length ? records : [normalized]);
     }

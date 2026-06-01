@@ -99,6 +99,21 @@ describe("WP-D: folder-aware show + 3-part gid", () => {
     expect(folder).toBe("Archive");
   });
 
+  it("showEmailsResolved survives one unopenable folder (partial success, not a throw)", async () => {
+    pushToTrash(405);
+    const r = await email.showEmailsResolved({
+      refs: [
+        { id: "405", folder: "Trash" }, // valid
+        { id: "777", folder: "NoSuchFolder" }, // folder open will throw
+      ],
+      account_id: "mock_acc",
+    });
+    // The valid Trash email must still come back; the bad folder degrades to failed_ids.
+    expect(r.emails.map((e) => e.id)).toContain("405");
+    expect(r.failed_ids.map((f) => f.id)).toContain("777");
+    expect(r.success).toBe(false);
+  });
+
   it("showEmailsResolved falls back to cache folder when ref has no folder", async () => {
     const dbPath = path.join(process.env.MAILBOX_DATA_DIR, "email_sync.db");
     pushToTrash(404);

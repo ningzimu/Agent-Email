@@ -237,7 +237,7 @@ function _groupsBreakdown(groups) {
   }));
 }
 
-function _filteredDryRunResult({ operation, targets, groups, markAs, permanent }) {
+function _filteredDryRunResult({ operation, targets, groups, markAs, permanent, skipped }) {
   const out = {
     success: true,
     dry_run: true,
@@ -247,6 +247,10 @@ function _filteredDryRunResult({ operation, targets, groups, markAs, permanent }
     confirmation_required: true,
     confirmation_hint: "Re-run with --confirm to apply changes",
   };
+  if (skipped && skipped.length) {
+    out.skipped_special_folders = skipped;
+    out.skipped_note = `Skipped special folders ${skipped.join(", ")} (pass --include-special to include them)`;
+  }
   if (operation === "delete") {
     out.would_delete = targets.length;
     out.permanent = Boolean(permanent);
@@ -257,6 +261,15 @@ function _filteredDryRunResult({ operation, targets, groups, markAs, permanent }
     out.message = `Dry run: would mark ${targets.length} emails as ${markAs}`;
   }
   return out;
+}
+
+// Special-use folders that a bulk --from/--subject filter should not delete from
+// by default (your own Sent/Drafts, already-Trashed, Spam). Matched on the last
+// path segment, case-insensitive.
+const _SPECIAL_MUTATION_FOLDER_RE = /^(sent|sent items|drafts?|junk|spam|trash|deleted|deleted items|bin|outbox)$/i;
+function _isSpecialMutationFolder(name) {
+  const seg = String(name || "").split("/").pop().trim();
+  return _SPECIAL_MUTATION_FOLDER_RE.test(seg);
 }
 
 async function _searchFilteredEmailTargets(opts) {
@@ -270,16 +283,31 @@ async function _searchFilteredEmailTargets(opts) {
     folder: searchFolder,
     limit: 1000,
   });
-  if (!result || !result.success) return { result, targets: [], groups: new Map() };
-  const targets = (result.emails || []).filter((e) => String(e.uid || e.id || "").trim());
+  if (!result || !result.success) return { result, targets: [], groups: new Map(), skipped_special_folders: [] };
+  let targets = (result.emails || []).filter((e) => String(e.uid || e.id || "").trim());
+
+  // Safety: when scanning all folders for a bulk mutation, skip special-use
+  // folders (Sent/Drafts/Junk/Trash) unless the user opts in with --include-special.
+  const skipped = new Set();
+  if (opts.allFolders && !opts.includeSpecial) {
+    targets = targets.filter((e) => {
+      if (_isSpecialMutationFolder(e.folder)) {
+        skipped.add(e.folder);
+        return false;
+      }
+      return true;
+    });
+  }
+
   return {
     result,
     targets,
     groups: _groupTargets(targets, opts.accountId, opts.allFolders ? "" : opts.folder),
+    skipped_special_folders: [...skipped],
   };
 }
 
-async function _applyFilteredEmailMutation({ operation, opts, targets, groups, markAs }) {
+async function _applyFilteredEmailMutation({ operation, opts, targets, groups, markAs, skipped }) {
   if (Boolean(opts.dryRun) || !Boolean(opts.confirm)) {
     return _filteredDryRunResult({
       operation,
@@ -287,6 +315,7 @@ async function _applyFilteredEmailMutation({ operation, opts, targets, groups, m
       groups,
       markAs,
       permanent: Boolean(opts.permanent),
+      skipped,
     });
   }
 
@@ -312,14 +341,52 @@ async function _applyFilteredEmailMutation({ operation, opts, targets, groups, m
     results.push({ account_id: g.accountId, folder: g.folder, ...result });
   }
 
-  if (results.length === 1) return results[0];
+  const skippedFields = skipped && skipped.length ? { skipped_special_folders: skipped } : {};
+  if (results.length === 1) return { ...results[0], ...skippedFields };
   return {
     success: results.every((r) => r && r.success),
     matched_count: targets.length,
     accounts_count: new Set([...groups.values()].map((g) => g.accountId)).size,
     groups: _groupsBreakdown(groups),
     results,
+    ...skippedFields,
   };
+}
+
+// Mutate explicit id refs honoring each ref's gid folder (3-part gids are
+// self-describing). Bare uids (no gid folder) fall back to defaultFolder so
+// existing `--folder` behavior is preserved. Groups by folder and applies the
+// mutation per group so a mix of folders is handled correctly.
+async function _applyIdRefMutation({ operation, refs, accountId, defaultFolder, markAs, opts, dryRun }) {
+  const groups = new Map();
+  for (const r of refs) {
+    const folder = r.folder || defaultFolder || "INBOX";
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(r.id);
+  }
+  const results = [];
+  for (const [folder, emailIds] of groups) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = operation === "delete"
+      ? await email.deleteEmails({
+        email_ids: emailIds,
+        folder,
+        permanent: Boolean(opts.permanent),
+        trash_folder: opts.trashFolder,
+        account_id: accountId,
+        dry_run: dryRun,
+      })
+      : await email.markEmails({
+        email_ids: emailIds,
+        mark_as: markAs,
+        folder,
+        account_id: accountId,
+        dry_run: dryRun,
+      });
+    results.push({ folder, ...res });
+  }
+  if (results.length === 1) return results[0];
+  return { success: results.every((r) => r && r.success), folders_count: results.length, results };
 }
 
 // Validate --limit/--offset. Returns { ok, limit, offset, error }.
@@ -902,6 +969,7 @@ async function main(argv) {
     .option("--account-id <id>")
     .option("--folder <name>", "Folder", "INBOX")
     .option("--all-folders", "With --from/--subject: target matches across ALL folders (grouped per folder)")
+    .option("--include-special", "With --all-folders: also target Sent/Drafts/Junk/Trash (off by default for safety)")
     .option("--from <addr>", "Filter by sender substring (IMAP server-side search)")
     .option("--subject <s>", "Filter by subject substring (IMAP server-side search)")
     .option("--unread-only", "Only target unread emails (combine with --from/--subject)")
@@ -942,6 +1010,7 @@ async function main(argv) {
           targets: searched.targets,
           groups: searched.groups,
           markAs: mark_as,
+          skipped: searched.skipped_special_folders,
         });
         const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email mark") });
         return process.exit(rc);
@@ -953,12 +1022,14 @@ async function main(argv) {
         return process.exit(rc);
       }
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
-      const result = await email.markEmails({
-        email_ids: refs.ids,
-        mark_as,
-        folder: opts.folder,
-        account_id: refs.accountId,
-        dry_run: dryRun,
+      const result = await _applyIdRefMutation({
+        operation: "mark",
+        refs: refs.refs,
+        accountId: refs.accountId,
+        defaultFolder: opts.folder,
+        markAs: mark_as,
+        opts,
+        dryRun,
       });
       if (dryRun && !opts.dryRun && result && typeof result === "object") {
         result.confirmation_required = true;
@@ -975,6 +1046,7 @@ async function main(argv) {
     .option("--account-id <id>")
     .option("--folder <name>", "Folder", "INBOX")
     .option("--all-folders", "With --from/--subject: target matches across ALL folders (grouped per folder)")
+    .option("--include-special", "With --all-folders: also target Sent/Drafts/Junk/Trash (off by default for safety)")
     .option("--from <addr>", "Filter by sender substring (IMAP server-side search)")
     .option("--subject <s>", "Filter by subject substring (IMAP server-side search)")
     .option("--unread-only", "Only target unread emails (combine with --from/--subject)")
@@ -1003,6 +1075,7 @@ async function main(argv) {
           opts,
           targets: searched.targets,
           groups: searched.groups,
+          skipped: searched.skipped_special_folders,
         });
         const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email delete") });
         return process.exit(rc);
@@ -1014,13 +1087,13 @@ async function main(argv) {
         return process.exit(rc);
       }
       const dryRun = Boolean(opts.dryRun) || !Boolean(opts.confirm);
-      const result = await email.deleteEmails({
-        email_ids: refs.ids,
-        folder: opts.folder,
-        permanent: Boolean(opts.permanent),
-        trash_folder: opts.trashFolder,
-        account_id: refs.accountId,
-        dry_run: dryRun,
+      const result = await _applyIdRefMutation({
+        operation: "delete",
+        refs: refs.refs,
+        accountId: refs.accountId,
+        defaultFolder: opts.folder,
+        opts,
+        dryRun,
       });
       if (dryRun && !opts.dryRun && result && typeof result === "object") {
         result.confirmation_required = true;
@@ -1703,4 +1776,4 @@ async function main(argv) {
   }
 }
 
-module.exports = { main, _groupTargets, _groupsBreakdown };
+module.exports = { main, _groupTargets, _groupsBreakdown, _isSpecialMutationFolder };

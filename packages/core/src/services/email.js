@@ -1147,10 +1147,23 @@ async function showEmailsResolved({ refs = [], account_id = "", ...opts } = {}) 
   const emails = [];
   const failed_ids = [];
   for (const [folder, ids] of byFolder) {
-    // eslint-disable-next-line no-await-in-loop
-    const res = await showEmails({ email_ids: ids, folder, account_id, ...opts });
+    let res;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      res = await showEmails({ email_ids: ids, folder, account_id, ...opts });
+    } catch (e) {
+      // A folder that can't be opened (stale/renamed/deleted) must not sink the
+      // whole batch — degrade that group to failed_ids and keep other folders.
+      const msg = e && e.message ? e.message : "fetch failed";
+      for (const id of ids) failed_ids.push({ id, error: msg, folder });
+      continue;
+    }
     if (res && res.success === false && !Array.isArray(res.emails)) {
-      return res; // hard error (e.g. account/folder open failure)
+      // Soft per-group error (e.g. mailboxOpen returned an error object): record
+      // it for this group's ids rather than aborting the whole resolve.
+      const msg = res.error || "fetch failed";
+      for (const id of ids) failed_ids.push({ id, error: msg, folder });
+      continue;
     }
     if (res && Array.isArray(res.emails)) emails.push(...res.emails);
     if (res && Array.isArray(res.failed_ids)) failed_ids.push(...res.failed_ids);

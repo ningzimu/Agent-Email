@@ -601,12 +601,15 @@ async function lookupFolderForUid({ dbPath, accountId, uid }) {
   try {
     const row = _execRows(
       h.db,
+      // IMAP UIDs are per-folder, so the same uid can exist in several folders.
+      // Prefer INBOX on a collision, then the most recently synced row, so a
+      // bare-uid `show` opens the most likely-intended message deterministically.
       `
         SELECT CASE WHEN e.folder_id IS NULL THEN 'INBOX' ELSE f.name END as folder
         FROM emails e
         LEFT JOIN folders f ON e.folder_id = f.id
         WHERE e.account_id = ? AND e.uid = ?
-        ORDER BY e.updated_at DESC
+        ORDER BY CASE WHEN (e.folder_id IS NULL OR f.name = 'INBOX') THEN 0 ELSE 1 END, e.updated_at DESC
         LIMIT 1
       `,
       [String(accountId || ""), u]

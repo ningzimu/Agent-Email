@@ -182,15 +182,16 @@ function buildServer() {
       confirm: z.boolean().optional().describe("Apply changes (default false = dry-run preview)."),
     },
   }, async (args) => {
-    const { ids, accountId } = _resolveRefs(args.ids, args.account_id);
+    const { accountId, refs } = _resolveRefs(args.ids, args.account_id);
     if (!accountId) return _toolResult({ success: false, error: "Missing account_id (or pass gid)", error_code: "invalid_argument" });
-    return _toolResult(await email.markEmails({
+    const groups = await _folderGroups(refs, accountId, args.folder);
+    return _toolResult(await _mutateByFolder(groups, (ids, folder) => email.markEmails({
       email_ids: ids,
       mark_as: args.mark_as,
-      folder: args.folder || "INBOX",
+      folder,
       account_id: accountId,
       dry_run: !args.confirm,
-    }));
+    })));
   });
 
   server.registerTool("email_delete", {
@@ -205,16 +206,17 @@ function buildServer() {
       confirm: z.boolean().optional(),
     },
   }, async (args) => {
-    const { ids, accountId } = _resolveRefs(args.ids, args.account_id);
+    const { accountId, refs } = _resolveRefs(args.ids, args.account_id);
     if (!accountId) return _toolResult({ success: false, error: "Missing account_id (or pass gid)", error_code: "invalid_argument" });
-    return _toolResult(await email.deleteEmails({
+    const groups = await _folderGroups(refs, accountId, args.folder);
+    return _toolResult(await _mutateByFolder(groups, (ids, folder) => email.deleteEmails({
       email_ids: ids,
-      folder: args.folder || "INBOX",
+      folder,
       permanent: Boolean(args.permanent),
       trash_folder: args.trash_folder || "Trash",
       account_id: accountId,
       dry_run: !args.confirm,
-    }));
+    })));
   });
 
   server.registerTool("email_flag", {
@@ -229,13 +231,14 @@ function buildServer() {
       confirm: z.boolean().optional(),
     },
   }, async (args) => {
-    const { ids, accountId } = _resolveRefs([args.id], args.account_id);
+    const { accountId, refs } = _resolveRefs([args.id], args.account_id);
     if (!accountId) return _toolResult({ success: false, error: "Missing account_id (or pass gid)", error_code: "invalid_argument" });
+    const folder = args.folder || (await email.resolveEmailFolder({ account_id: accountId, uid: refs[0].id, folder: refs[0].folder }));
     return _toolResult(await email.flagEmail({
-      email_id: ids[0],
+      email_id: refs[0].id,
       set_flag: Boolean(args.set),
       flag_type: args.flag_type || "flagged",
-      folder: args.folder || "INBOX",
+      folder,
       account_id: accountId,
       dry_run: !args.confirm,
     }));
@@ -252,15 +255,17 @@ function buildServer() {
       confirm: z.boolean().optional(),
     },
   }, async (args) => {
-    const { ids, accountId } = _resolveRefs(args.ids, args.account_id);
+    const { accountId, refs } = _resolveRefs(args.ids, args.account_id);
     if (!accountId) return _toolResult({ success: false, error: "Missing account_id (or pass gid)", error_code: "invalid_argument" });
-    return _toolResult(await email.moveEmails({
+    // The gid's folder is the SOURCE; an explicit source_folder overrides it.
+    const groups = await _folderGroups(refs, accountId, args.source_folder);
+    return _toolResult(await _mutateByFolder(groups, (ids, source) => email.moveEmails({
       email_ids: ids,
       target_folder: args.target_folder,
-      source_folder: args.source_folder || "INBOX",
+      source_folder: source,
       account_id: accountId,
       dry_run: !args.confirm,
-    }));
+    })));
   });
 
   server.registerTool("email_send", {
@@ -386,16 +391,55 @@ function buildServer() {
   return server;
 }
 
+// Parse a ref: 3-part gid account_id:folder:uid (preferred), legacy 2-part
+// account_id:uid, or a bare uid. Folder is "" when not encoded.
+function _parseRef(s) {
+  const str = String(s);
+  const parts = str.split(":");
+  if (parts.length >= 3 && parts[0] && /^\d+$/.test(parts[parts.length - 1])) {
+    return { id: parts[parts.length - 1], account_id: parts[0], folder: parts.slice(1, -1).join(":") };
+  }
+  const idx = str.lastIndexOf(":");
+  if (idx > 0 && /^\d+$/.test(str.slice(idx + 1))) return { id: str.slice(idx + 1), account_id: str.slice(0, idx), folder: "" };
+  return { id: str, account_id: "", folder: "" };
+}
+
 function _resolveRefs(ids, explicitAccountId) {
-  const refs = ids.map((s) => {
-    const idx = s.lastIndexOf(":");
-    if (idx > 0 && /^\d+$/.test(s.slice(idx + 1))) return { id: s.slice(idx + 1), account_id: s.slice(0, idx) };
-    return { id: s, account_id: "" };
-  });
+  const refs = ids.map(_parseRef);
   let accountId = explicitAccountId || "";
   const fromGids = new Set(refs.map((r) => r.account_id).filter(Boolean));
   if (!accountId && fromGids.size === 1) accountId = [...fromGids][0];
-  return { ids: refs.map((r) => r.id), accountId };
+  return { ids: refs.map((r) => r.id), accountId, refs };
+}
+
+// Group ref ids by the folder to mutate: an explicit folder arg wins; otherwise
+// the gid's own folder; otherwise the cache (resolveEmailFolder); otherwise
+// INBOX. UIDs are per-folder in IMAP, so mutating in the wrong folder hits the
+// wrong message — this keeps 3-part gids self-describing for mutations too.
+async function _folderGroups(refs, accountId, explicitFolder) {
+  const groups = new Map();
+  for (const r of refs) {
+    // eslint-disable-next-line no-await-in-loop
+    const folder = explicitFolder
+      ? explicitFolder
+      : await email.resolveEmailFolder({ account_id: accountId, uid: r.id, folder: r.folder });
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(r.id);
+  }
+  return groups;
+}
+
+// Apply a per-folder mutation (mk(ids, folder) -> result) and merge. Single
+// group returns the result directly (with its folder); multiple groups are
+// wrapped with a per-folder results[] list.
+async function _mutateByFolder(groups, mk) {
+  const results = [];
+  for (const [folder, ids] of groups) {
+    // eslint-disable-next-line no-await-in-loop
+    results.push({ folder, ...(await mk(ids, folder)) });
+  }
+  if (results.length === 1) return results[0];
+  return { success: results.every((r) => r && r.success), folders_count: results.length, results };
 }
 
 async function startStdioServer() {
@@ -405,4 +449,4 @@ async function startStdioServer() {
   // McpServer holds the loop alive via the transport.
 }
 
-module.exports = { buildServer, startStdioServer };
+module.exports = { buildServer, startStdioServer, _parseRef, _resolveRefs, _folderGroups };

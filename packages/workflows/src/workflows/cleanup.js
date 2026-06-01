@@ -28,6 +28,9 @@ function _record(e) {
   };
 }
 
+// NOTE: list rows do not carry the List-Unsubscribe header (only show does), so
+// marketing detection here relies on sender/subject heuristics. classify() still
+// honors list_unsubscribe when present (e.g. when classifying show output).
 async function plan({ account_id = "", folder = "INBOX", limit = 200, unread_only = false } = {}) {
   const list = await email.listEmails({
     limit: Number(limit || 200),

@@ -86,6 +86,22 @@ describe("WP-C: --format compact / jsonl", () => {
     expect(Object.keys(obj).sort()).toEqual([...COMPACT_KEYS].sort());
   });
 
+  it("--format jsonl on an empty list emits zero lines (not a metadata object)", async () => {
+    const root = tmpRoot("fmt_jsonl_empty");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    // --since far in the future → 0 emails.
+    const r = await execa(
+      "node",
+      [mailboxBin(), "email", "list", "--folder", "INBOX", "--account-id", "mock_acc", "--live", "--since", "2099-01-01", "--format", "jsonl"],
+      { reject: false, env }
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe(""); // no lines, not a wrapped metadata object
+  });
+
   it("single email show --format compact projects to agent fields + success", async () => {
     const root = tmpRoot("fmt_show_compact");
     fs.rmSync(root, { recursive: true, force: true });
