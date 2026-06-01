@@ -209,24 +209,41 @@ function _targetSample(emails) {
   }));
 }
 
-function _groupTargetUids(emails, fallbackAccountId) {
+// Group targets by (account_id, folder) so a cross-account / cross-folder filter
+// mutates each mailbox with its own folder. Each group also keeps a small subject
+// sample for the dry-run preview.
+function _groupTargets(emails, fallbackAccountId, fallbackFolder) {
   const groups = new Map();
   for (const e of emails || []) {
     const uid = String(e.uid || e.id || "").trim();
     if (!uid) continue;
     const accountId = String(e.account_id || fallbackAccountId || "");
-    if (!groups.has(accountId)) groups.set(accountId, []);
-    groups.get(accountId).push(uid);
+    const folder = String(e.folder || fallbackFolder || "INBOX");
+    const key = `${accountId} ${folder}`;
+    if (!groups.has(key)) groups.set(key, { accountId, folder, uids: [], sample: [] });
+    const g = groups.get(key);
+    g.uids.push(uid);
+    if (g.sample.length < 3) g.sample.push(e.subject || "");
   }
   return groups;
 }
 
-function _filteredDryRunResult({ operation, targets, markAs, permanent }) {
+function _groupsBreakdown(groups) {
+  return [...groups.values()].map((g) => ({
+    account_id: g.accountId,
+    folder: g.folder,
+    count: g.uids.length,
+    sample: g.sample.slice(0, 3),
+  }));
+}
+
+function _filteredDryRunResult({ operation, targets, groups, markAs, permanent }) {
   const out = {
     success: true,
     dry_run: true,
     would_target_count: targets.length,
     would_target_sample: _targetSample(targets),
+    groups: _groupsBreakdown(groups),
     confirmation_required: true,
     confirmation_hint: "Re-run with --confirm to apply changes",
   };
@@ -243,12 +260,14 @@ function _filteredDryRunResult({ operation, targets, markAs, permanent }) {
 }
 
 async function _searchFilteredEmailTargets(opts) {
+  // --all-folders searches every selectable folder; otherwise the named folder.
+  const searchFolder = opts.allFolders ? "all" : opts.folder;
   const result = await email.searchEmails({
     from: opts.from,
     subject: opts.subject,
     account_id: opts.accountId,
     unread_only: opts.unreadOnly,
-    folder: opts.folder,
+    folder: searchFolder,
     limit: 1000,
   });
   if (!result || !result.success) return { result, targets: [], groups: new Map() };
@@ -256,7 +275,7 @@ async function _searchFilteredEmailTargets(opts) {
   return {
     result,
     targets,
-    groups: _groupTargetUids(targets, opts.accountId),
+    groups: _groupTargets(targets, opts.accountId, opts.allFolders ? "" : opts.folder),
   };
 }
 
@@ -265,38 +284,40 @@ async function _applyFilteredEmailMutation({ operation, opts, targets, groups, m
     return _filteredDryRunResult({
       operation,
       targets,
+      groups,
       markAs,
       permanent: Boolean(opts.permanent),
     });
   }
 
   const results = [];
-  for (const [accountId, emailIds] of groups.entries()) {
+  for (const g of groups.values()) {
     // eslint-disable-next-line no-await-in-loop
     const result = operation === "delete"
       ? await email.deleteEmails({
-        email_ids: emailIds,
-        folder: opts.folder,
+        email_ids: g.uids,
+        folder: g.folder,
         permanent: Boolean(opts.permanent),
         trash_folder: opts.trashFolder,
-        account_id: accountId,
+        account_id: g.accountId,
         dry_run: false,
       })
       : await email.markEmails({
-        email_ids: emailIds,
+        email_ids: g.uids,
         mark_as: markAs,
-        folder: opts.folder,
-        account_id: accountId,
+        folder: g.folder,
+        account_id: g.accountId,
         dry_run: false,
       });
-    results.push({ account_id: accountId, ...result });
+    results.push({ account_id: g.accountId, folder: g.folder, ...result });
   }
 
   if (results.length === 1) return results[0];
   return {
     success: results.every((r) => r && r.success),
     matched_count: targets.length,
-    accounts_count: results.length,
+    accounts_count: new Set([...groups.values()].map((g) => g.accountId)).size,
+    groups: _groupsBreakdown(groups),
     results,
   };
 }
@@ -880,6 +901,7 @@ async function main(argv) {
     .option("--mark-as <state>", "Mark as read/unread")
     .option("--account-id <id>")
     .option("--folder <name>", "Folder", "INBOX")
+    .option("--all-folders", "With --from/--subject: target matches across ALL folders (grouped per folder)")
     .option("--from <addr>", "Filter by sender substring (IMAP server-side search)")
     .option("--subject <s>", "Filter by subject substring (IMAP server-side search)")
     .option("--unread-only", "Only target unread emails (combine with --from/--subject)")
@@ -952,6 +974,7 @@ async function main(argv) {
     .argument("[email_ids...]")
     .option("--account-id <id>")
     .option("--folder <name>", "Folder", "INBOX")
+    .option("--all-folders", "With --from/--subject: target matches across ALL folders (grouped per folder)")
     .option("--from <addr>", "Filter by sender substring (IMAP server-side search)")
     .option("--subject <s>", "Filter by subject substring (IMAP server-side search)")
     .option("--unread-only", "Only target unread emails (combine with --from/--subject)")
@@ -1632,4 +1655,4 @@ async function main(argv) {
   }
 }
 
-module.exports = { main };
+module.exports = { main, _groupTargets, _groupsBreakdown };
