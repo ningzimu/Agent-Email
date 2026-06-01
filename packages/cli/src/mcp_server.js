@@ -116,7 +116,7 @@ function buildServer() {
 
   server.registerTool("email_show", {
     title: "Read one or more emails",
-    description: "Fetch the body of one or more emails over a single IMAP connection. Each id can be a bare UID + account_id, or a global gid in the form 'account_id:uid'. AI-friendly defaults: HTML excluded, body capped at 2000 chars, URLs stripped. Pass full=true to opt back to raw HTML + uncapped body + URLs.",
+    description: "Fetch the body of one or more emails over a single IMAP connection. Each id can be a bare UID + account_id, or a global gid in the form 'account_id:uid'. AI-friendly defaults: HTML excluded, body capped at 2000 chars, URLs stripped, and HTML-only mail is auto-converted to a text body (body_source='html_derived'). Pass full=true to opt back to raw HTML + uncapped body + URLs.",
     inputSchema: {
       ids: z.array(z.string()).min(1).describe("UIDs or gids."),
       account_id: accountIdOpt,
@@ -125,7 +125,7 @@ function buildServer() {
       include_html: z.boolean().optional(),
       strip_urls: z.boolean().optional(),
       body_max_len: z.number().int().min(0).max(200000).optional(),
-      html_max_len: z.number().int().min(0).max(500000).optional(),
+      html_max_len: z.number().int().min(-1).max(500000).optional().describe("0 = strip HTML, -1 = unlimited, >0 = cap at N chars."),
     },
   }, async (args) => {
     // Resolve gids
@@ -145,7 +145,7 @@ function buildServer() {
       folder: args.folder || "INBOX",
       account_id: resolvedAccount,
       body_max_len: args.body_max_len != null ? args.body_max_len : (args.full ? 0 : 2000),
-      html_max_len: args.html_max_len != null ? args.html_max_len : 0,
+      html_max_len: args.html_max_len != null ? args.html_max_len : (args.full ? -1 : 0),
       include_html: args.include_html != null ? args.include_html : Boolean(args.full),
       strip_urls: args.strip_urls != null ? args.strip_urls : !args.full,
     };

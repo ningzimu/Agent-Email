@@ -754,8 +754,9 @@ async function main(argv) {
     .option("--full", "Return full HTML + uncapped body + URLs (overrides AI-friendly defaults)")
     .option("--preview", "Return a very short body preview (400 chars body, 2000 chars HTML)")
     .option("--body-max-len <n>", "Max body length (characters)")
-    .option("--html-max-len <n>", "Max HTML length (characters)")
+    .option("--html-max-len <n>", "Max HTML length: 0 = strip HTML, -1 = unlimited, >0 = cap")
     .option("--no-html", "Exclude HTML body")
+    .option("--text-only", "Text body only (alias for --no-html)")
     .option("--include-html", "Include HTML body (overrides AI default)")
     .option("--strip-urls", "Remove URLs from body text")
     .option("--keep-urls", "Keep URLs in body text (overrides AI default)")
@@ -764,10 +765,11 @@ async function main(argv) {
       const htmlMaxRaw = opts.htmlMaxLen != null ? Number(opts.htmlMaxLen) : null;
       // AI-friendly defaults: text only, body ~ 2000 chars, URLs stripped.
       // --full opts back to "give me everything" for human / debug use.
+      // html_max_len: 0 = strip, -1 = unlimited, >0 = cap (do not clamp negatives).
       let bodyMax = Number.isFinite(bodyMaxRaw) ? Math.max(0, bodyMaxRaw) : (opts.full ? 0 : 2000);
-      let htmlMax = Number.isFinite(htmlMaxRaw) ? Math.max(0, htmlMaxRaw) : 0;
+      let htmlMax = Number.isFinite(htmlMaxRaw) ? htmlMaxRaw : (opts.full ? -1 : 0);
       let includeHtml = opts.full ? true : Boolean(opts.includeHtml);
-      if (opts.html === false) includeHtml = false; // explicit --no-html still wins
+      if (opts.html === false || opts.textOnly) includeHtml = false; // --no-html / --text-only win
       let stripUrls = opts.full ? false : !Boolean(opts.keepUrls);
       if (opts.stripUrls) stripUrls = true;
       if (opts.preview) {

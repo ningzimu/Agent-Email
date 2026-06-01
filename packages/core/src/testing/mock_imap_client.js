@@ -9,6 +9,30 @@ function _cloneMessage(m) {
     `Date: ${m.date}`,
   ];
   if (m.listUnsubscribe) headers.push(`List-Unsubscribe: ${m.listUnsubscribe}`);
+  let source;
+  if (m.html) {
+    // multipart/alternative so mailparser yields both parsed.text and parsed.html
+    const boundary = "MOCKBOUND";
+    source = Buffer.from(
+      [
+        ...headers,
+        `Content-Type: multipart/alternative; boundary="${boundary}"`,
+        "",
+        `--${boundary}`,
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        m.body || "",
+        `--${boundary}`,
+        "Content-Type: text/html; charset=utf-8",
+        "",
+        m.html,
+        `--${boundary}--`,
+        "",
+      ].join("\n")
+    );
+  } else {
+    source = Buffer.from([...headers, "", m.body || ""].join("\n"));
+  }
   return {
     uid: m.uid,
     envelope: {
@@ -21,13 +45,7 @@ function _cloneMessage(m) {
     },
     flags: new Set([...m.flags]),
     internalDate: new Date(m.date.replace(" ", "T") + "Z"),
-    source: Buffer.from(
-      [
-        ...headers,
-        "",
-        m.body || "",
-      ].join("\n")
-    ),
+    source,
     bodyStructure: {
       childNodes: (m.attachments || []).map((a) => ({
         disposition: "attachment",

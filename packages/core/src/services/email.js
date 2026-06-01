@@ -657,6 +657,94 @@ function _stripUrls(text) {
   return String(text || "").replace(/https?:\/\/\S+/gi, "[link]");
 }
 
+// Dependency-free HTML -> plain text. Good enough to give an agent a readable
+// body for HTML-only mail (transactional senders, Moomoo, etc.) without shelling
+// out to a parser. Not a sanitizer; output is plain text only.
+function _htmlToText(html) {
+  let s = String(html || "");
+  s = s.replace(/<!--[\s\S]*?-->/g, " ");
+  s = s.replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ");
+  s = s.replace(/<\/(p|div|li|tr|h[1-6]|blockquote|section|article|header|footer|table|ul|ol)>/gi, "\n");
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<[^>]+>/g, " ");
+  s = s
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => {
+      try {
+        return String.fromCodePoint(Number(n));
+      } catch {
+        return " ";
+      }
+    });
+  s = s.replace(/[ \t\f\r]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return s;
+}
+
+// Single source of truth for body/html projection across showEmail (live + test)
+// and showEmails. html_max_len semantics: <0 = unlimited, 0 = strip, >0 = cap.
+// When the text body is empty but html exists, derive a text body from the html.
+function _composeBody({ text, html, body_max_len = 0, html_max_len = 0, include_html = true, strip_urls = false }) {
+  const includeHtml = include_html !== false;
+  const htmlText = typeof html === "string" ? html : "";
+  const rawText = String(text || "");
+  // HTML-only mail often carries a near-empty text/plain part (just whitespace),
+  // so treat whitespace-only text as absent and fall back to the html.
+  const hasText = rawText.trim().length > 0;
+
+  let body = hasText ? rawText : "";
+  let bodySource = hasText ? "text" : "empty";
+  if (!hasText && htmlText) {
+    const derived = _htmlToText(htmlText);
+    if (derived) {
+      body = derived;
+      bodySource = "html_derived";
+    }
+  }
+
+  const bodyBase = strip_urls ? _stripUrls(body) : body;
+  const bodyMax = Math.max(0, Number(body_max_len || 0));
+  let bodyOut = bodyBase;
+  let bodyTruncated = false;
+  if (bodyMax > 0 && bodyOut.length > bodyMax) {
+    bodyOut = bodyOut.slice(0, bodyMax);
+    bodyTruncated = true;
+  }
+
+  let htmlOut = "";
+  let htmlTruncated = false;
+  if (includeHtml) {
+    const hm = Number(html_max_len);
+    if (hm < 0) {
+      htmlOut = htmlText; // unlimited
+    } else if (hm === 0) {
+      htmlOut = ""; // strip
+    } else if (htmlText.length > hm) {
+      htmlOut = htmlText.slice(0, hm);
+      htmlTruncated = true;
+    } else {
+      htmlOut = htmlText;
+    }
+  }
+
+  return {
+    body: bodyOut,
+    html_body: htmlOut,
+    body_source: bodySource,
+    body_included: Boolean(bodyOut),
+    html_included: includeHtml,
+    body_url_stripped: Boolean(strip_urls),
+    body_length: bodyBase.length,
+    html_length: htmlText.length,
+    body_truncated: bodyTruncated,
+    html_truncated: htmlTruncated,
+  };
+}
+
 function _parseListUnsubscribeHeader(value) {
   if (!value) return null;
   const str = Array.isArray(value) ? value.join(", ") : String(value);
@@ -741,25 +829,14 @@ async function showEmail({
         content_type: a.contentType || "application/octet-stream",
       }));
       const unread = !(raw.flags || new Set([])).has("\\Seen");
-      const bodyText = String(raw.body || "");
-      const htmlText = String(raw.html || "");
-      const bodyBase = strip_urls ? _stripUrls(bodyText) : bodyText;
-      const bodyMax = Math.max(0, Number(body_max_len || 0));
-      const htmlMax = Math.max(0, Number(html_max_len || 0));
-      const includeHtml = include_html !== false;
-      let bodyOut = bodyBase;
-      let htmlOut = htmlText;
-      let bodyTruncated = false;
-      let htmlTruncated = false;
-      if (bodyMax > 0 && bodyOut.length > bodyMax) {
-        bodyOut = bodyOut.slice(0, bodyMax);
-        bodyTruncated = true;
-      }
-      if (includeHtml && htmlMax > 0 && htmlOut.length > htmlMax) {
-        htmlOut = htmlOut.slice(0, htmlMax);
-        htmlTruncated = true;
-      }
-      if (!includeHtml) htmlOut = "";
+      const composed = _composeBody({
+        text: raw.body,
+        html: raw.html,
+        body_max_len,
+        html_max_len,
+        include_html,
+        strip_urls,
+      });
       return {
         success: true,
         id: String(raw.uid),
@@ -770,11 +847,8 @@ async function showEmail({
         cc: raw.cc || "",
         subject: raw.subject,
         date: raw.date,
-        body: bodyOut,
-        html_body: htmlOut,
+        ...composed,
         has_html: Boolean(raw.html),
-        html_included: includeHtml,
-        body_url_stripped: Boolean(strip_urls),
         attachments,
         attachment_count: attachments.length,
         unread,
@@ -785,10 +859,6 @@ async function showEmail({
         account: acc.account.email,
         account_id: acc.account.id,
         from_cache: false,
-        body_length: bodyText.length,
-        html_length: htmlText.length,
-        body_truncated: bodyTruncated,
-        html_truncated: htmlTruncated,
       };
     }
 
@@ -802,25 +872,14 @@ async function showEmail({
       content_type: a.contentType || "application/octet-stream",
     }));
 
-    const bodyText = String(parsed.text || "");
-    const htmlText = typeof parsed.html === "string" ? parsed.html : "";
-    const bodyBase = strip_urls ? _stripUrls(bodyText) : bodyText;
-    const bodyMax = Math.max(0, Number(body_max_len || 0));
-    const htmlMax = Math.max(0, Number(html_max_len || 0));
-    const includeHtml = include_html !== false;
-    let bodyOut = bodyBase;
-    let htmlOut = htmlText;
-    let bodyTruncated = false;
-    let htmlTruncated = false;
-    if (bodyMax > 0 && bodyOut.length > bodyMax) {
-      bodyOut = bodyOut.slice(0, bodyMax);
-      bodyTruncated = true;
-    }
-    if (includeHtml && htmlMax > 0 && htmlOut.length > htmlMax) {
-      htmlOut = htmlOut.slice(0, htmlMax);
-      htmlTruncated = true;
-    }
-    if (!includeHtml) htmlOut = "";
+    const composed = _composeBody({
+      text: parsed.text,
+      html: parsed.html,
+      body_max_len,
+      html_max_len,
+      include_html,
+      strip_urls,
+    });
 
     return {
       success: true,
@@ -832,11 +891,8 @@ async function showEmail({
       cc: parsed.cc ? parsed.cc.text || "" : "",
       subject: parsed.subject || (msg.envelope ? msg.envelope.subject : ""),
       date: formatDateTime(parsed.date || msg.internalDate),
-      body: bodyOut,
-      html_body: htmlOut,
+      ...composed,
       has_html: Boolean(parsed.html),
-      html_included: includeHtml,
-      body_url_stripped: Boolean(strip_urls),
       attachments,
       attachment_count: attachments.length,
       unread,
@@ -849,10 +905,6 @@ async function showEmail({
       account: acc.account.email,
       account_id: acc.account.id,
       from_cache: false,
-      body_length: bodyText.length,
-      html_length: htmlText.length,
-      body_truncated: bodyTruncated,
-      html_truncated: htmlTruncated,
       list_unsubscribe: _extractListUnsubscribe(parsed),
     };
   });
@@ -876,10 +928,6 @@ async function showEmails({
   if (!acc.success) return acc;
 
   const openFolder = _normalizeFolder(folder);
-  const bodyMax = Math.max(0, Number(body_max_len || 0));
-  const htmlMax = Math.max(0, Number(html_max_len || 0));
-  const includeHtml = include_html !== false;
-
   return withImapClient(acc.account, async (client) => {
     await client.mailboxOpen(openFolder);
     const emails = [];
@@ -904,22 +952,14 @@ async function showEmails({
           size: a.size || 0,
           content_type: a.contentType || "application/octet-stream",
         }));
-        const bodyText = String(parsed.text || "");
-        const htmlText = typeof parsed.html === "string" ? parsed.html : "";
-        const bodyBase = strip_urls ? _stripUrls(bodyText) : bodyText;
-        let bodyOut = bodyBase;
-        let htmlOut = htmlText;
-        let bodyTruncated = false;
-        let htmlTruncated = false;
-        if (bodyMax > 0 && bodyOut.length > bodyMax) {
-          bodyOut = bodyOut.slice(0, bodyMax);
-          bodyTruncated = true;
-        }
-        if (includeHtml && htmlMax > 0 && htmlOut.length > htmlMax) {
-          htmlOut = htmlOut.slice(0, htmlMax);
-          htmlTruncated = true;
-        }
-        if (!includeHtml) htmlOut = "";
+        const composed = _composeBody({
+          text: parsed.text,
+          html: parsed.html,
+          body_max_len,
+          html_max_len,
+          include_html,
+          strip_urls,
+        });
         emails.push({
           id: String(msg.uid),
           gid: `${acc.account.id}:${msg.uid}`,
@@ -928,21 +968,14 @@ async function showEmails({
           cc: parsed.cc ? parsed.cc.text || "" : "",
           subject: parsed.subject || (msg.envelope ? msg.envelope.subject : ""),
           date: formatDateTime(parsed.date || msg.internalDate),
-          body: bodyOut,
-          html_body: htmlOut,
+          ...composed,
           has_html: Boolean(parsed.html),
-          html_included: includeHtml,
-          body_url_stripped: Boolean(strip_urls),
           attachments,
           attachment_count: attachments.length,
           unread: !flags.has("\\Seen"),
           message_id: parsed.messageId || (msg.envelope ? msg.envelope.messageId : ""),
           in_reply_to: parsed.inReplyTo || "",
           references: Array.isArray(parsed.references) ? parsed.references.join(" ") : (parsed.references || ""),
-          body_length: bodyText.length,
-          html_length: htmlText.length,
-          body_truncated: bodyTruncated,
-          html_truncated: htmlTruncated,
           list_unsubscribe: _extractListUnsubscribe(parsed),
         });
       } catch (e) {
