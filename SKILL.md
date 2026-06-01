@@ -3,7 +3,7 @@ name: mailbox
 description: Read, search, send, and manage email across Gmail, QQ, 163, Outlook and any IMAP/SMTP account from the command line. Use when the user asks to "read my email", "查邮件", "look up an Amazon order email", "find the customer review notification", "send an email", "回复邮件", "delete spam", "查未读", "show unread", "synchronize my mailbox", "set up MCP for email", or anything that involves listing / searching / reading / writing / classifying messages from one or more mailboxes. See skills/mailbox/SKILL.md for full instructions.
 metadata:
   author: leeguooooo
-  version: "0.1.0"
+  version: "0.2.0"
   homepage: https://github.com/leeguooooo/Mailbox
 keywords:
   - mailbox

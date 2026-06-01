@@ -3,7 +3,7 @@ name: mailbox
 description: Read, search, send, and manage email across Gmail, QQ, 163, Outlook and any IMAP/SMTP account from the command line. Use when the user asks to "read my email", "查邮件", "look up an Amazon order email", "find the customer review notification", "send an email", "回复邮件", "delete spam", "查未读", "show unread", "synchronize my mailbox", "set up MCP for email", or anything that involves listing / searching / reading / writing / classifying messages from one or more mailboxes.
 metadata:
   author: leeguooooo
-  version: "0.1.0"
+  version: "0.2.0"
   homepage: https://github.com/leeguooooo/Mailbox
 keywords:
   - mailbox
@@ -56,13 +56,20 @@ before continuing.
 ### Read / search
 
 ```bash
-# List recent emails (cache when warm; pass --live to force IMAP):
+# List recent emails (cache when warm; pass --live to force IMAP).
+# 'list' is INBOX-only — passing --folder all warns you to use 'search' instead.
 mailbox email list --account-id <id> --limit 20 --json
 mailbox email list --account-id <id> --limit 20 --with-preview 200 --json   # +body snippet, one trip
+mailbox email list --since 7d --json                 # --since is an alias of --date-from (7d/today/YYYY-MM-DD)
+mailbox email list --account-unread --json           # also compute account_unread_total (unread across all folders)
+
+# Recent across ALL accounts, merged newest-first (omit --account-id == all accounts):
+mailbox email recent --limit 30 --json
+mailbox email recent --since 3d --json
 
 # Search (server-side IMAP for Gmail; client-side fallback for QQ/163/Outlook):
 mailbox email search --from amazon --subject review --folder all --json
-mailbox email search --query "interview"  --date-from 2w --json    # relative dates: 2d/3w/1mo/today/yesterday
+mailbox email search --query "interview"  --since 2w --json    # relative dates: 2d/3w/1mo/today/yesterday
 
 # NOTE: on QQ/163/126/sina/aliyun/outlook, IMAP TEXT search is broken,
 # so the CLI falls back to envelope-only client-side filtering. That
@@ -71,14 +78,21 @@ mailbox email search --query "interview"  --date-from 2w --json    # relative da
 # `--subject` for predictable results, or use a Gmail account where
 # X-GM-RAW does search the body server-side.
 
-# Read one or many emails (AI-friendly defaults: text only, capped at 2000 chars, URLs stripped):
-mailbox email show <gid> --json                    # gid = "<account_id>:<uid>" — no --account-id needed
-mailbox email show <gid1> <gid2> <gid3> --json     # batch — one IMAP connection
+# Read one or many emails (AI-friendly defaults: text only, capped 2000 chars, URLs stripped,
+# HTML excluded; HTML-only mail is auto-converted to a text body — see body_source).
+mailbox email show <gid> --json                    # gid = "<account_id>:<folder>:<uid>"
+mailbox email show <gid1> <gid2> <gid3> --json     # batch — one IMAP connection, spans folders
 mailbox email show <gid> --full --json             # raw HTML + uncapped + URLs (rarely needed)
+mailbox email show <gid> --text-only --json        # force no HTML (alias of --no-html)
+mailbox email show <gid> --html-max-len 0 --json   # 0 = strip HTML, -1 = unlimited, >0 = cap
 
 # Folders:
 mailbox email folders --account-id <id> --json
 ```
+
+The **gid is self-describing** (`account_id:folder:uid`), so `email show <gid>` opens the
+right mailbox with no `--folder` — even for results from `search --folder all`. The legacy
+2-part `account_id:uid` form still works (folder falls back to the cache, then INBOX).
 
 ### Mutate (all dry-run by default)
 
@@ -88,10 +102,37 @@ mailbox email delete <gid> --confirm --json        # default moves to Trash; pas
 mailbox email flag <gid> --set --confirm --json
 mailbox email move <gid1> <gid2> --target-folder Archive --confirm --json
 mailbox email send --to a@b.com --subject hi --body "..." --confirm --json
+
+# Filtered batch mark/delete by sender/subject (no need to list+collect ids first):
+mailbox email delete --from newsletter@shop.com --confirm --json
+mailbox email mark   --subject "[ci]" --read --confirm --json
+mailbox email delete --from spam@x.com --all-folders --confirm --json   # span folders; grouped per folder
 ```
 
-Without `--confirm`, every destructive command returns a JSON dry-run
-preview (recipients / would-mark count / etc.) and changes nothing.
+`gid`-based and filtered mutations are **folder-aware**: a 3-part gid mutates in *its* folder
+(not INBOX), and `--from/--subject` matches carry their folder. The dry-run preview includes a
+`groups` breakdown (per `account_id` + `folder`, with sample subjects) so you can eyeball what
+will change before `--confirm`. Filters matching >100 emails require `--confirm`.
+
+**Safety:** `--all-folders` skips special-use folders (Sent / Drafts / Junk / Trash) by
+default — pass `--include-special` to include them. Without `--confirm`, every destructive
+command returns a JSON dry-run preview and changes nothing.
+
+### Triage / cleanup
+
+```bash
+# Classify INBOX and propose a deletion plan (read-only; never deletes):
+mailbox cleanup --account-id <id> --json
+# Then actually delete the marketing + routine_notification candidates:
+mailbox cleanup --account-id <id> --confirm --json
+mailbox cleanup --categories marketing --confirm --json   # only one category
+```
+
+`cleanup` buckets each email into `protected_finance` / `protected_travel` / `security` /
+`support_case` (never deleted) vs `marketing` / `routine_notification` (cleanup candidates) vs
+`unknown`. Rules are sender/domain/subject based; override the allowlists via
+`<configDir>/cleanup_rules.json`. The plan reports `by_category`, `candidates_by_category`, and
+`protected_counts`; `--confirm` pipes the candidate categories into `email delete`.
 
 ### Discover the surface
 
@@ -102,11 +143,12 @@ mailbox <cmd> --help --json   # structured help: { name, description, options, a
 
 ## Token-saving tips
 
+- **`--format compact` (global flag)** projects each email to just `{id, account_id, folder, date, from, subject, unread, has_attachments, body_text_preview}` — the lightest useful shape for scanning. `--format jsonl` emits one JSON object per line (composable: `--format compact,jsonl`). `agent` is an alias of `compact`.
 - **`--lean` (global flag, before subcommand)** strips ~10 noisy/duplicate top-level fields and per-email duplicates. Typical response shrinks by ~30%.
 - **`--with-preview <N>`** on `email list / email search` fetches a body snippet alongside the envelope — saves one `email show` per email.
-- **Batch `email show <gid1> <gid2> ...`** reuses one IMAP connection. Use it whenever you need ≥2 emails.
-- **`gid`** (returned in every list/search/show response) is the global ID — pass it instead of bare UID + `--account-id`.
-- **Relative date shortcuts**: `--date-from 2d` (2 days ago), `3w`, `1mo`, `1y`, `12h`, `30m`, `today`, `yesterday`, `last-week`, `last-month`. ISO 8601 / `YYYY-MM-DD` still work.
+- **Batch `email show <gid1> <gid2> ...`** reuses one IMAP connection (and spans folders). Use it whenever you need ≥2 emails.
+- **`gid`** (returned in every list/search/show response) is the global ID `account_id:folder:uid` — pass it instead of bare UID + `--account-id`, and `show`/mutate auto-target its folder.
+- **Relative date shortcuts** (on `--since` / `--date-from`): `7d` (7 days ago), `3w`, `1mo`, `1y`, `12h`, `30m`, `today`, `yesterday`, `last-week`, `last-month`. ISO 8601 / `YYYY-MM-DD` still work.
 - **`mailbox <cmd> --help --json`** returns a JSON descriptor of arguments, options, defaults — use to introspect any command instead of parsing human text.
 
 ## Output contract
@@ -114,8 +156,18 @@ mailbox <cmd> --help --json   # structured help: { name, description, options, a
 - Every response: `success: boolean`. On failure: `error: string` + `error_code: string`.
 - Common `error_code` values: `account_not_found`, `email_not_found`, `folder_not_found`, `invalid_argument`, `invalid_date`, `invalid_limit`, `ambiguous_account`, `size_limit`, `auth_failed`, `network_error`, `imap_error`, `smtp_error`, `operation_failed`, `unknown_error`.
 - Exit codes: 0 success, 1 operation failed, 2 invalid usage.
-- Every email object carries `gid` ("`<account_id>:<uid>`"). Prefer it over bare `id`/`uid`.
-- Batch `email show` returns `{ success, emails: [...], failed_ids: [{id, error}], requested, returned }`.
+- Every email object carries `gid` ("`<account_id>:<folder>:<uid>`"). Prefer it over bare `id`/`uid`.
+- Batch `email show` returns `{ success, emails: [...], failed_ids: [{id, error, folder}], requested, returned }`.
+- **Unread counts** on `list`/`recent` are three distinct fields — read the right one:
+  `unread_in_result` (unread among the rows actually returned — always trustworthy),
+  `folder_unread` (server count for the queried folder; `unread_count` is a back-compat alias),
+  `account_unread_total` (across all folders — `null` unless `--account-unread`), plus
+  `unread_as_of` + `from_cache` for snapshot freshness.
+- **Email body**: `body` (text), `body_source` (`text` | `html_derived` | `empty`), `html_body`
+  (empty unless `--full`/`--include-html`). HTML-only mail still yields a usable `body`.
+- **Attachments**: each carries `is_signature` / `is_inline` / `is_real_attachment`;
+  `real_attachment_count` and `has_attachments` count only real attachments (an `smime.p7s`
+  S/MIME signature does not flip `has_attachments`).
 - `--with-preview` adds `preview: string` and `preview_truncated: bool` per email.
 
 ## Safety rules
@@ -135,12 +187,16 @@ mailbox mcp config --json   # prints an mcpServers entry to paste into the clien
 mailbox mcp serve           # run the server manually for testing (stdio)
 ```
 
-15 tools registered: `account_list`, `account_test_connection`,
+16 tools registered: `account_list`, `account_test_connection`,
 `email_list`, `email_search`, `email_show`, `email_folders`,
 `email_mark`, `email_delete`, `email_flag`, `email_move`, `email_send`,
-`sync_status`, `sync_force`, `inbox_organize`, `digest_run`.
+`sync_status`, `sync_force`, `inbox_organize`, `cleanup`, `digest_run`.
 
-Each destructive tool defaults to dry-run; pass `confirm: true` to apply.
+Each destructive tool defaults to dry-run; pass `confirm: true` to apply. `email_show` and the
+mutate tools accept 3-part gids (`account_id:folder:uid`) and auto-target the gid's folder;
+`email_list` exposes the `unread_in_result` / `folder_unread` / `account_unread_total` fields
+and accepts `include_account_unread`; relative `date_from`/`date_to` shortcuts (`2d`/`3w`/…)
+now work on the MCP path. `cleanup` returns a read-only plan unless `confirm: true`.
 
 ## Persistent daemon (5-30× faster CLI calls)
 
