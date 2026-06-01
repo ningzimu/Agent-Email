@@ -41,16 +41,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Stamp release version (so `mailbox --version` is correct)
-        shell: bash
-        run: |
-          set -euo pipefail
-          v="${GITHUB_REF_NAME:-}"
-          case "$v" in
-            v[0-9]*) node scripts/set_release_version.js "$v" ;;
-            *) echo "ref '$v' is not a vX.Y.Z tag; skipping version stamp" ;;
-          esac
-
+      # NOTE: do not run scripts/set_release_version.js here — it rewrites the
+      # mailbox-cli/packages/* versions, which breaks `pnpm install --frozen-lockfile`
+      # inside build:binary (ERR_PNPM_OUTDATED_LOCKFILE), and those files aren't what
+      # the binary reads for --version anyway. `mailbox --version` reporting 0.0.0 is a
+      # known cosmetic gap tracked separately.
       - name: Build mailbox binary
         run: pnpm build:binary
 
