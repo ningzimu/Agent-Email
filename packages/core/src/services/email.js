@@ -15,6 +15,20 @@ function _isTestMode() {
   return String(process.env.MAILBOX_INTERNAL_TEST_MODE || "").trim() === "1";
 }
 
+// Freshness window for cache-served list/recent. When a cached read comes back
+// with fewer rows than requested AND its newest sync is older than this many
+// seconds, listEmails self-heals by falling through to a live IMAP fetch — so a
+// just-arrived email (e.g. an OTP) isn't silently missed between syncs. Set to
+// 0 to disable the auto-fallback (cache results are then always trusted as-is).
+// Read lazily (per call) so the env var can be overridden at runtime/in tests.
+const CACHE_FRESH_SECONDS_DEFAULT = 120; // conservative default
+function _cacheFreshSeconds() {
+  const raw = process.env.MAILBOX_CACHE_FRESH_SECONDS;
+  if (raw == null || String(raw).trim() === "") return CACHE_FRESH_SECONDS_DEFAULT;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : CACHE_FRESH_SECONDS_DEFAULT;
+}
+
 // Hard caps to defend against hostile mail. Override via env if needed.
 const MAX_MESSAGE_BYTES = Number(process.env.MAILBOX_MAX_MESSAGE_BYTES || 50 * 1024 * 1024); // 50 MiB
 const MAX_ATTACHMENT_BYTES = Number(process.env.MAILBOX_MAX_ATTACHMENT_BYTES || 25 * 1024 * 1024); // 25 MiB per file
@@ -336,17 +350,46 @@ async function listEmails({
         includeAccountUnread,
       });
       if (cache && cache.success) {
-        // Add multi-account metadata similar to Python contract.
-        const all = accounts.getAllAccountsResolved();
-        const accounts_count = resolvedId ? 1 : (all.success ? (all.accounts || []).length : 0);
-        return {
-          ...cache,
-          total_emails: cache.total_in_folder,
-          total_unread: cache.unread_count,
-          accounts_count,
-          accounts_info: [],
-          ...(dateWarnings.length ? { warnings: dateWarnings } : {}),
-        };
+        const returned = Array.isArray(cache.emails) ? cache.emails.length : 0;
+        const thin = lim > 0 && returned < lim; // empty or fewer rows than asked for
+        const ageSec = cache.cache_age_seconds; // null = unknown freshness
+        const freshSeconds = _cacheFreshSeconds();
+        const stale = freshSeconds > 0 && (ageSec == null || ageSec > freshSeconds);
+
+        // Self-heal: a thin AND stale cache read is exactly the silent-miss
+        // case (e.g. asking for the latest mail seconds after it arrived, before
+        // the next sync). Don't return the cache — fall through to live IMAP so
+        // freshly-arrived mail is picked up. A thin-but-fresh read is trusted
+        // (the folder genuinely has that few), as is a full read.
+        if (thin && stale) {
+          if (process.env.MAILBOX_DEBUG) {
+            const ageStr = ageSec == null ? "unknown" : `${ageSec}s`;
+            process.stderr.write(
+              `mailbox: cache thin (${returned}/${lim}) and stale (age ${ageStr} > ${freshSeconds}s) — refetching live\n`
+            );
+          }
+          // fall through to the live IMAP path below
+        } else {
+          // Add multi-account metadata similar to Python contract.
+          const all = accounts.getAllAccountsResolved();
+          const accounts_count = resolvedId ? 1 : (all.success ? (all.accounts || []).length : 0);
+          // Annotate thin cached results with a machine-readable freshness hint
+          // so a caller that gets 0 (or few) rows can tell it was served from a
+          // cache snapshot and knows the lever to force a live read. Only added
+          // when thin — a full result needs no nudge.
+          const hint = thin
+            ? `served from cache (age ${ageSec == null ? "unknown" : `${ageSec}s`}); pass --live (or use_cache=false) to force a live IMAP fetch`
+            : undefined;
+          return {
+            ...cache,
+            total_emails: cache.total_in_folder,
+            total_unread: cache.unread_count,
+            accounts_count,
+            accounts_info: [],
+            ...(hint ? { hint } : {}),
+            ...(dateWarnings.length ? { warnings: dateWarnings } : {}),
+          };
+        }
       }
     } catch (e) {
       // Cache failed → fall through to live IMAP. Surface the reason so users
@@ -378,6 +421,7 @@ async function listEmails({
         unread_in_result: 0,
         account_unread_total: null,
         unread_as_of: null,
+        cache_age_seconds: null,
         total_emails: 0,
         total_unread: 0,
         accounts_count: 0,
@@ -458,6 +502,7 @@ async function listEmails({
     unread_in_result,
     account_unread_total,
     unread_as_of: null, // live counts are current
+    cache_age_seconds: null, // live fetch — not from a cache snapshot
     total_emails: total_in_folder,
     total_unread: unread_count,
     accounts_count: results.length,

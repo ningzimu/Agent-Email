@@ -74,7 +74,7 @@ function compactEmail(e) {
   // gid lets an agent chain straight into `email show` from compact output.
   // Prefer the carried 3-part gid; otherwise synthesize account_id:folder:uid.
   const gid = e.gid || (e.account_id && id ? `${e.account_id}:${e.folder || "INBOX"}:${id}` : id);
-  return {
+  const out = {
     id,
     gid,
     account_id: e.account_id || "",
@@ -86,6 +86,10 @@ function compactEmail(e) {
     has_attachments: hasAttachments,
     body_text_preview: preview,
   };
+  // Carry extracted OTP/verification codes through the compact projection — the
+  // whole point of --extract-code is to skip the body, so the codes must survive.
+  if (Array.isArray(e.codes)) out.codes = e.codes;
+  return out;
 }
 
 // Pull the email-like records out of a result, tolerating both the list/search
@@ -106,6 +110,14 @@ const COMPACT_TOP_LEVEL_KEEP = new Set([
   "returned",
   "requested",
   "unread_in_result",
+  // Cache-freshness signals: must survive --format compact so an agent that
+  // gets an empty/thin list can still tell it came from a (possibly stale)
+  // cache snapshot and knows to pass --live. Without these the compact shape
+  // was a silent failure on freshly-arrived mail.
+  "from_cache",
+  "unread_as_of",
+  "cache_age_seconds",
+  "hint",
 ]);
 
 function compactResult(result) {
@@ -134,7 +146,10 @@ const LEAN_DROP_TOP_LEVEL = new Set([
   "search_params",
   "failed_searches",
   "partial_success",
-  "from_cache",
+  // NOTE: from_cache is intentionally NOT dropped under --lean — it's a
+  // freshness signal an agent needs even in the slim shape (e.g. to decide
+  // whether to re-run with --live). cache_age_seconds / unread_as_of / hint
+  // likewise survive lean (they're not listed here).
   "use_cache",
   "unread_only",
   "folder",
@@ -274,6 +289,39 @@ function invalidUsage({ message, asJson, pretty }) {
   return 2;
 }
 
+// Pull likely verification / one-time codes out of free text. Covers the two
+// shapes agents actually chase: bare 4–8 digit OTPs, and the prefixed
+// "LL-DDDDDD" form (e.g. "QB-046193", "G-1234"). De-duplicated, order-preserved.
+// Heuristic by design — a caller should still eyeball context for ambiguous mail.
+function extractCodes(text) {
+  const s = String(text || "");
+  if (!s) return [];
+  const out = [];
+  const seen = new Set();
+  const coveredDigits = new Set(); // digit-runs already emitted via a prefixed match
+  const push = (c) => {
+    if (c && !seen.has(c)) {
+      seen.add(c);
+      out.push(c);
+    }
+  };
+  // Prefixed forms first: 1–4 letters + a literal hyphen + 4–8 digits
+  // ("QB-046193", "G-1234"). Hyphen-only (not whitespace) so prose like
+  // "Code 123456" or "year 2026" isn't misread as a prefixed code.
+  const prefixed = s.match(/\b[A-Z]{1,4}-\d{4,8}\b/gi) || [];
+  for (const m of prefixed) {
+    push(m.toUpperCase());
+    const digits = m.match(/\d{4,8}$/);
+    if (digits) coveredDigits.add(digits[0]);
+  }
+  // Bare 4–8 digit runs not glued to other digits (avoids slicing order #s,
+  // years inside longer numbers, phone numbers, etc.). Skip runs already
+  // surfaced as the tail of a prefixed code so we don't double-report them.
+  const bare = s.match(/(?<!\d)\d{4,8}(?!\d)/g) || [];
+  for (const m of bare) if (!coveredDigits.has(m)) push(m);
+  return out;
+}
+
 module.exports = {
   parseGlobalFlags,
   parseFormatModes,
@@ -282,6 +330,7 @@ module.exports = {
   collectEmails,
   ensureSuccessField,
   exitCodeForResult,
+  extractCodes,
   handleJsonOrText,
   invalidUsage,
   inferErrorCode,

@@ -200,12 +200,23 @@ mailbox <cmd> --help --json   # structured help: { name, description, options, a
   `folder_unread` (server count for the queried folder; `unread_count` is a back-compat alias),
   `account_unread_total` (across all folders — `null` unless `--account-unread`), plus
   `unread_as_of` + `from_cache` for snapshot freshness.
+- **Cache freshness** is always reported on `list`/`recent` (including empty/compact results):
+  `from_cache` (bool), `cache_age_seconds` (how stale the snapshot is; `null` = live or unknown),
+  and, on a thin cached result, a `hint` string telling you to pass `--live`. So an empty list is
+  never a silent "nothing arrived" — check `from_cache`/`cache_age_seconds` before concluding.
+- **Self-healing on a thin+stale cache**: when a cached `list`/`recent` comes back with fewer rows
+  than `--limit` AND the snapshot is older than the freshness window (default 120s, set via
+  `MAILBOX_CACHE_FRESH_SECONDS`; `0` disables), the CLI auto-falls back to a live IMAP fetch — so a
+  just-arrived OTP isn't missed between syncs. Pass `--live` to force IMAP outright.
 - **Email body**: `body` (text), `body_source` (`text` | `html_derived` | `empty`), `html_body`
   (empty unless `--full`/`--include-html`). HTML-only mail still yields a usable `body`.
 - **Attachments**: each carries `is_signature` / `is_inline` / `is_real_attachment`;
   `real_attachment_count` and `has_attachments` count only real attachments (an `smime.p7s`
   S/MIME signature does not flip `has_attachments`).
 - `--with-preview` adds `preview: string` and `preview_truncated: bool` per email.
+- **Verification / OTP codes**: `email show ... --extract-code` scans subject+body and adds a
+  `codes: [...]` array (4–8 digit OTPs plus prefixed `LL-DDDDDD` forms like `QB-046193`). It's a
+  candidate list, ordered as found; the field survives `--format compact`.
 
 ## Safety rules
 

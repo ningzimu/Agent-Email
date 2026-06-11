@@ -323,6 +323,17 @@ function _placeholders(values) {
   return values.map(() => "?").join(", ");
 }
 
+// Age in whole seconds of an ISO-8601 timestamp (e.g. folders.last_sync)
+// relative to now. Returns null for a missing/unparseable input so callers
+// can tell "unknown freshness" apart from "0s old", and clamps negatives to
+// 0 (a clock skew shouldn't surface as a negative age).
+function _ageSecondsFrom(iso) {
+  if (iso == null) return null;
+  const t = Date.parse(String(iso));
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 1000));
+}
+
 async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limit, offset, dateFrom, dateTo, from, includeAccountUnread = false }) {
   if (!dbPath || !fs.existsSync(dbPath)) return null;
 
@@ -454,6 +465,12 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
     // server snapshot which can be stale relative to the cached rows.
     const unread_in_result = emails.filter((e) => e.unread).length;
 
+    // cache_age_seconds: how old the freshest sync for this scope is, derived
+    // from `last_sync` (== unread_as_of). Lets a caller tell "served from cache,
+    // N seconds stale" apart from "freshly fetched". null when no sync snapshot
+    // is available (so callers can distinguish "unknown" from "0s old").
+    const cache_age_seconds = _ageSecondsFrom(unread_as_of);
+
     // Optional: unread across ALL synced folders for the scope (cheap in cache).
     let account_unread_total = null;
     if (includeAccountUnread) {
@@ -475,6 +492,7 @@ async function listEmailsFromCache({ dbPath, accountId, folder, unreadOnly, limi
       unread_in_result,
       account_unread_total,
       unread_as_of,
+      cache_age_seconds,
       cached_emails,
       cached_unread,
       offset: Number(offset),

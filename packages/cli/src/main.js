@@ -15,6 +15,22 @@ function _printTextNotImplemented(label) {
   process.stderr.write(`${label} (text mode) is not implemented yet. Use --json.\n`);
 }
 
+// --extract-code: scan subject+body for verification/OTP codes and stamp a
+// `codes:[...]` field onto a show result (single or batch). Mutates in place
+// and returns the result. Saves an agent the show → eyeball-regex round-trip.
+function _attachExtractedCodes(result) {
+  if (!result || typeof result !== "object") return result;
+  const codesFor = (e) => contract.extractCodes(`${e.subject || ""}\n${e.body || ""}`);
+  if (Array.isArray(result.emails)) {
+    for (const e of result.emails) {
+      if (e && typeof e === "object") e.codes = codesFor(e);
+    }
+  } else {
+    result.codes = codesFor(result);
+  }
+  return result;
+}
+
 // Width-aware truncation that counts wide CJK glyphs as 2 columns so columns
 // stay aligned in a monospace terminal.
 function _displayWidth(str) {
@@ -938,6 +954,7 @@ async function main(argv) {
     .option("--include-html", "Include HTML body (overrides AI default)")
     .option("--strip-urls", "Remove URLs from body text")
     .option("--keep-urls", "Keep URLs in body text (overrides AI default)")
+    .option("--extract-code", "Also scan subject+body for verification/OTP codes and return them as codes:[...]")
     .action(async (emailIds, opts) => {
       const bodyMaxRaw = opts.bodyMaxLen != null ? Number(opts.bodyMaxLen) : null;
       const htmlMaxRaw = opts.htmlMaxLen != null ? Number(opts.htmlMaxLen) : null;
@@ -973,6 +990,7 @@ async function main(argv) {
         const folderHint = explicitFolder || (refs.refs[0] && refs.refs[0].folder) || "";
         const folder = await email.resolveEmailFolder({ account_id: refs.accountId, uid: ids[0], folder: folderHint });
         const result = await email.showEmail({ email_id: ids[0], folder, ...baseOpts });
+        if (opts.extractCode) _attachExtractedCodes(result);
         const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email show") });
         process.exit(rc);
       }
@@ -981,6 +999,7 @@ async function main(argv) {
       const result = explicitFolder
         ? await email.showEmails({ email_ids: ids, folder: explicitFolder, ...baseOpts })
         : await email.showEmailsResolved({ refs: refs.refs, ...baseOpts });
+      if (opts.extractCode) _attachExtractedCodes(result);
       const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email show") });
       process.exit(rc);
     });

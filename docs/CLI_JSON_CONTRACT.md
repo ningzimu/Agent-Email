@@ -88,7 +88,10 @@ Common shape (superset):
   ],
   "offset": 0,
   "limit": 50,
-  "from_cache": true
+  "from_cache": true,
+  "unread_as_of": "2026-06-11T00:00:00.000Z",
+  "cache_age_seconds": 42,
+  "hint": "served from cache (age 42s); pass --live (or use_cache=false) to force a live IMAP fetch"
 }
 ```
 Notes:
@@ -98,6 +101,16 @@ Notes:
   after sorting by date.
 - `accounts_info[].fetched` is the count returned in the merged list.
 - `accounts_info[].fetched_raw` is the count fetched per account before merge.
+- **Cache freshness** (`list`/`recent`) — always present, even on an empty list:
+  - `from_cache` (bool), `unread_as_of` (ISO snapshot time), `cache_age_seconds`
+    (snapshot age in seconds; `null` when served live or unknown).
+  - `hint` (string) appears only on a *thin* cached result (fewer rows than
+    `limit`, e.g. empty) to point at `--live`. These fields survive
+    `--format compact` and `--lean`, so an empty cached list is never a silent
+    failure.
+  - Self-heal: a thin **and** stale (older than `MAILBOX_CACHE_FRESH_SECONDS`,
+    default 120s; `0` disables) cached read auto-falls back to live IMAP, so a
+    just-arrived email is picked up without an explicit `--live`.
 
 ### email search
 Two main variants (optimized vs fallback). Keep a union of fields:
@@ -171,6 +184,11 @@ Two main variants (optimized vs fallback). Keep a union of fields:
   "html_truncated": false
 }
 ```
+Notes:
+- `--extract-code` adds `codes: [...]` — verification/OTP candidates scanned from
+  subject+body (bare 4–8 digit codes plus prefixed `LL-DDDDDD` forms like
+  `QB-046193`), ordered as found and de-duplicated. On a batch `show` the array
+  is attached per email. Survives `--format compact`.
 
 ### email mark
 Dry-run:
