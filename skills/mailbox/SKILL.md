@@ -20,10 +20,10 @@ keywords:
 
 # Mailbox CLI Skill
 
-Drives the `@leeguoo/mailbox-cli` Node CLI to read and manage email across
-multiple IMAP accounts. Returns a stable JSON contract — every response
-includes `success: boolean` and, on failure, `error: string` +
-`error_code: string` (machine-readable).
+Drives the `mailbox` Node CLI to read and manage email across multiple IMAP
+accounts. Returns a stable JSON contract — every response includes
+`success: boolean` and, on failure, `error: string` + `error_code: string`
+(machine-readable).
 
 ## Compatibility — check the CLI version first
 
@@ -40,9 +40,14 @@ These commands/flags require **mailbox ≥ 2.11.0**:
 `--format compact|jsonl`, `email recent`, `cleanup`, `--since`, `--account-unread`,
 `--text-only`, the 3-part gid (`account_id:folder:uid`), and `search --timeout`.
 
-Probe before relying on them: `mailbox --version`. Update by re-running the installer above
-(`MAILBOX_VERSION=v2.11.2 …` to pin). On an older CLI, use these fallbacks (all available
-since early versions):
+Probe before relying on them: `mailbox --version`. Update by re-running the
+installer above. To pin a version, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | MAILBOX_VERSION=v2.14.0 sh
+```
+
+On an older CLI, use these fallbacks (all available since early versions):
 
 | Newer | Fallback on < 2.11 |
 |---|---|
@@ -58,14 +63,13 @@ To tell whether a command exists, probe `mailbox <cmd> --help --json` and check
 ## Setup (one time, by the user)
 
 ```bash
-# 1. Install the CLI from GitHub Releases (no npm/Node needed; prebuilt binary):
+# 1. Install the CLI from GitHub Releases (prebuilt binary):
 curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
-#    (npm is deprecated: `npm install -g @leeguoo/mailbox-cli` may lag the releases)
 
 # 2. Configure accounts (edit credentials):
 mkdir -p ~/.config/mailbox
-cp $(npm prefix -g)/lib/node_modules/@leeguoo/mailbox-cli/examples/accounts.example.json \
-   ~/.config/mailbox/auth.json
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/examples/accounts.example.json \
+  -o ~/.config/mailbox/auth.json
 $EDITOR ~/.config/mailbox/auth.json
 
 # 3. (Recommended) install the persistent daemon for ~5-30× faster calls:
@@ -274,5 +278,5 @@ Measured (Gmail INBOX, M2 MacBook over residential WAN):
 ## Reference
 
 - Repo: https://github.com/ningzimu/Agent-Email
-- npm: https://www.npmjs.com/package/@leeguoo/mailbox-cli
+- Releases: https://github.com/ningzimu/Agent-Email/releases
 - JSON contract docs: `docs/CLI_JSON_CONTRACT.md`

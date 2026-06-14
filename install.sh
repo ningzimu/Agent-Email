@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
 #
 # Env overrides:
-#   MAILBOX_VERSION=v2.11.2   install a specific tag (default: latest release)
+#   MAILBOX_VERSION=v2.14.0   install a specific tag (default: latest release)
 #   MAILBOX_INSTALL_DIR=...   install dir (default: ~/.local/bin)
 #   MAILBOX_REPO=owner/repo   GitHub repo to download from (default: ningzimu/Agent-Email)
 set -eu
@@ -31,7 +31,7 @@ case "$os" in
       x86_64) target="linux-x64-gnu" ;;
       *) err "unsupported Linux arch: $arch (only x86_64 prebuilt)" ;;
     esac ;;
-  *) err "unsupported OS: $os (macOS/Linux only; on Windows use WSL or npm)" ;;
+  *) err "unsupported OS: $os (macOS/Linux only; on Windows use WSL)" ;;
 esac
 
 # --- resolve download URL ----------------------------------------------------

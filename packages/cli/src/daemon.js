@@ -268,7 +268,7 @@ function _resolveCliExecutable() {
   //   { node: process.execPath, script: argv[1] } so the unit reads
   //   `node /abs/path/mailbox.js daemon start …`.
   //
-  // - In a pkg-bundled binary (the npm distribution), `process.execPath`
+  // - In a pkg-bundled binary, `process.execPath`
   //   IS the standalone binary and `process.argv[1]` is `/snapshot/...`
   //   — a virtual path that only exists inside the binary's embedded
   //   filesystem. In that case the unit must invoke the binary directly

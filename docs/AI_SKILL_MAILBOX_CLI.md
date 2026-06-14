@@ -14,20 +14,21 @@ Use these tags/keywords for discovery:
 - OpenClaw keywords (keep this list short):
   - `mailbox`, `email`, `imap`, `smtp`, `cli`, `automation`, `openclaw`, `agent`, `sync`, `inbox`
 
-- Extended tags (npm/GitHub topics):
+- Extended tags:
   - `search`, `attachments`, `digest`, `monitor`, `ai`
 
-## Install (npm)
+## Install
 
-Install the published CLI:
+Install the published CLI from GitHub Releases:
 
 ```bash
-npm install -g @leeguoo/mailbox-cli
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
 mailbox --help
 mailbox --version
 ```
 
-This npm package ships prebuilt binaries per platform (no Python required).
+The installer downloads a prebuilt binary for the current platform (no Python
+required).
 
 ## Configuration files
 

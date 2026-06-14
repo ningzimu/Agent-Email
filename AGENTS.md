@@ -5,15 +5,14 @@
   - `packages/cli/` CLI entry + command definitions
   - `packages/core/` IMAP/SMTP + storage + account migration
   - `packages/shared/` path resolution + JSON contract helpers
-  - `packages/workflows/` digest/monitor/inbox workflows
-- `mailbox-cli/` contains the npm launcher + platform binary packages.
+- `packages/workflows/` digest/monitor/inbox workflows
 - `scripts/` contains build helpers (notably `scripts/build_binary.js`).
 - `docs/` holds CLI contract + release docs; legacy Python/MCP docs remain under `docs/archive/`.
 
 ## Build, Test, and Development Commands
 - Install dependencies: `pnpm install`
 - Run tests: `pnpm test`
-- Build local pkg binary (and copy into `mailbox-cli` platform package): `pnpm build:binary`
+- Build local pkg binary into `dist/mailbox`: `pnpm build:binary`
 - Run dev CLI: `pnpm -C packages/cli test` or `node packages/cli/bin/mailbox.js --help`
 
 ## Coding Style & Naming Conventions

@@ -6,7 +6,7 @@ Primary docs for the Node CLI rewrite:
 
 - `docs/AI_SKILL_MAILBOX_CLI.md` (automation/agent usage)
 - `docs/CLI_JSON_CONTRACT.md` (JSON output shapes)
-- `docs/RELEASING.md` (binaries + npm distribution)
+- `docs/RELEASING.md` (GitHub Release binaries)
 - `docs/NODE_REWRITE_PLAN.md` (roadmap/architecture)
 
 Legacy Python/MCP docs are kept for reference only:

@@ -3,7 +3,7 @@
 CLI-first email management for multi-account IMAP/SMTP with a local sync cache.
 
 Primary interface: the `mailbox` CLI (Node.js implementation). This repo ships
-prebuilt platform binaries via npm (no Python required for end users).
+prebuilt platform binaries via GitHub Releases (no Python required for end users).
 
 ## Supported Providers
 
@@ -15,7 +15,7 @@ prebuilt platform binaries via npm (no Python required for end users).
 
 ## Install
 
-### From GitHub Releases (recommended — no npm, no Node)
+### From GitHub Releases (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
@@ -24,25 +24,17 @@ mailbox --help
 
 Downloads the prebuilt binary for your platform (macOS arm64/x64, Linux x64) from the
 [latest GitHub Release](https://github.com/ningzimu/Agent-Email/releases/latest), verifies its
-checksum, and installs to `~/.local/bin`. Pin a version with `MAILBOX_VERSION=v2.11.2`, or
+checksum, and installs to `~/.local/bin`. Pin a version with `MAILBOX_VERSION=v2.14.0`, or
 change the dir with `MAILBOX_INSTALL_DIR=...`.
-
-### npm (deprecated)
-
-```bash
-npm install -g @leeguoo/mailbox-cli   # may lag the GitHub Releases; prefer the installer above
-```
-
-The npm registry is no longer the primary channel — releases ship as GitHub Release binaries.
 
 ### As an AI Skill (Claude Code / Cursor / etc.)
 
 ```bash
 # Project scope — installs into ./.claude/skills/mailbox (or ./.cursor/skills/...):
-npx skills add ningzimu/Agent-Email --skill mailbox
+skills add ningzimu/Agent-Email --skill mailbox
 
 # User scope — installs into ~/.claude/skills/mailbox:
-npx skills add ningzimu/Agent-Email --skill mailbox -g
+skills add ningzimu/Agent-Email --skill mailbox -g
 ```
 
 The skill assumes the CLI is on `PATH` (install via the `curl … install.sh | sh` above).
@@ -60,7 +52,7 @@ mailbox mcp config --json   # prints a paste-ready mcpServers entry
 pnpm install
 pnpm test
 
-# build a local platform binary into mailbox-cli/packages/<platform>/bin/mailbox
+# build a local platform binary into dist/mailbox
 pnpm build:binary
 ```
 
@@ -100,7 +92,7 @@ mailbox email mark 123456 --read --account-id my_account_id --folder INBOX --con
 mailbox email delete 123456 --account-id my_account_id --folder INBOX --confirm --json
 
 # bulk mutate by sender or subject (no UID list needed)
-mailbox email mark --from "support@npmjs.com" --read --confirm --account-id my_account_id --json
+mailbox email mark --from "support@example.com" --read --confirm --account-id my_account_id --json
 mailbox email delete --from "newsletter" --account-id my_account_id --json    # dry-run preview
 mailbox email delete --subject "[ad]" --account-id my_account_id --confirm --json
 ```

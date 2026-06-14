@@ -17,6 +17,5 @@ Modules:
 
 Distribution:
 
-- The user-facing install is `mailbox-cli` (npm launcher + platform packages).
-- The platform packages ship a prebuilt `mailbox` binary (built from Node via
-  `pkg`).
+- The user-facing install downloads prebuilt `mailbox` binaries from GitHub Releases.
+- Release binaries are built from Node via `pkg` for macOS arm64/x64 and Linux x64.

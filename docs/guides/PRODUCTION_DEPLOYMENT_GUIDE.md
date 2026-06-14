@@ -1,8 +1,8 @@
 # 🚀 生产环境部署指南
 
 > Legacy notice: This guide was written for the old Python scripts + HTTP API.
-> The Node rewrite ships a `mailbox` CLI via npm. Prefer `mailbox sync daemon`
-> and other CLI subcommands.
+> The Node rewrite ships a `mailbox` CLI via GitHub Releases. Prefer
+> `mailbox sync daemon` and other CLI subcommands.
 
 基于 Leo 的 review 建议，这里是生产环境稳定运行的完整配置指南。
 
@@ -48,8 +48,8 @@ export API_SECRET_KEY="your-secret"
 ### 3. 脚本权限和路径
 
 ```bash
-# 确保脚本可执行
-chmod +x /path/to/mailbox/mailbox-cli/packages/*/bin/mailbox
+# 确保 CLI 可执行
+chmod +x ~/.local/bin/mailbox
 
 # 验证 Python 路径
 which python

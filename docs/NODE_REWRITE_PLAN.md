@@ -2,7 +2,7 @@
 
 ## Summary
 Rebuild the project as a pure Node.js implementation packaged into prebuilt
-platform binaries and distributed via npm, **with OpenClaw as the primary
+platform binaries and distributed via GitHub Releases, **with OpenClaw as the primary
 integration surface**. Keep the existing `mailbox` CLI contract and
 config/data compatibility, but replace the Python codebase with Node.js.
 
@@ -19,7 +19,7 @@ This plan targets the following commands as MVP:
 
 ## Goals
 - Pure Node.js implementation (JS, not TS).
-- Zero-setup user experience: `npm i -g @leeguoo/mailbox-cli` -> `mailbox` (no Python,
+- Zero-setup user experience: install from GitHub Releases -> `mailbox` (no Python,
   no native build/compilation on user machines).
 - OpenClaw-first usage: mailbox works cleanly as an OpenClaw skill/tool.
 - Keep current CLI JSON output contract for skill usage.
@@ -39,14 +39,12 @@ This plan targets the following commands as MVP:
   already provides channels.
 
 ## Distribution Decision (User Simplicity)
-To keep installation as simple as possible, we will **continue the current npm
-distribution model**:
-- `mailbox-cli` (launcher package) provides the `mailbox` command.
-- Platform packages provide the actual binary.
+To keep installation as simple as possible, distribution uses GitHub Releases:
+- `install.sh` downloads the right prebuilt binary for the current platform.
+- Release assets provide the actual binary.
 
-The difference is the **binary will be produced from the Node.js rewrite**,
-not from Python. This keeps the user experience unchanged (`npm i -g
-@leeguoo/mailbox-cli`) and avoids native compilation at install time.
+The binary is produced from the Node.js rewrite, not from Python. This avoids
+native compilation at install time.
 
 ## OpenClaw Integration (Primary Path)
 - Mailbox is treated as an OpenClaw skill/tool.
@@ -174,8 +172,7 @@ Phase 5: Workflows
 Phase 6: Remove Python/MCP
 - Remove Python MCP code and update docs.
 - Update skill docs to reference Node CLI.
-- Keep launcher + platform binary packages, but swap the binary build pipeline
-  to produce Node-based binaries.
+- Build Node-based binaries and publish them as GitHub Release assets.
 
 ## Testing Plan
 - Unit tests for config resolver and parsers.
@@ -184,10 +181,8 @@ Phase 6: Remove Python/MCP
 - Snapshot tests for CLI JSON output.
 
 ## Release Plan
-- Publish `@leeguoo/mailbox-cli` npm package with `mailbox` bin.
-- Publish platform binary packages built from the Node implementation.
-- Ensure `npm i -g @leeguoo/mailbox-cli` works with no Python dependency and no native
-  compilation step on user machines.
+- Publish platform binaries built from the Node implementation as GitHub Release assets.
+- Ensure `install.sh` works with no Python dependency and no native compilation step on user machines.
 - Document upgrade/migration for existing users.
 
 ## Open Questions

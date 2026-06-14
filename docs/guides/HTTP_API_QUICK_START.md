@@ -3,8 +3,8 @@
 > Legacy notice: This document describes a Python HTTP API service that no
 > longer ships with this repository.
 >
-> The supported interface is the `mailbox` CLI (Node.js) installed via
-> `npm i -g @leeguoo/mailbox-cli`.
+> The supported interface is the `mailbox` CLI (Node.js) installed from
+> GitHub Releases.
 
 **推荐架构**: Python HTTP 服务 + 本地定时任务/脚本调用
 

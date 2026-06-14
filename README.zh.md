@@ -2,29 +2,29 @@
 
 以 CLI 为核心的多邮箱（IMAP/SMTP）管理工具，支持本地同步缓存（SQLite）。
 
-主入口：`mailbox` CLI（Node.js 实现）。本仓库通过 npm 分发按平台预编译二进制，终端用户无需安装 Python。
+主入口：`mailbox` CLI（Node.js 实现）。本仓库通过 GitHub Releases 分发按平台预编译二进制，终端用户无需安装 Python。
 
 说明：本仓库不再提供 MCP server/stdio 能力。
 
 ## 安装
 
-### npm（推荐）
+### GitHub Releases（推荐）
 
-使用 npm 安装：
+使用安装脚本下载当前平台的预编译二进制：
 
 ```bash
-npm install -g mailbox-cli
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
 mailbox --help
 ```
 
-使用 npm 安装（scoped）：
+默认安装到 `~/.local/bin`。可以通过环境变量指定版本或安装目录：
 
 ```bash
-npm install -g @leeguoo/mailbox-cli
-mailbox --help
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | MAILBOX_VERSION=v2.14.0 sh
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | MAILBOX_INSTALL_DIR=/usr/local/bin sh
 ```
 
-npm 包按平台提供预编译二进制（无需 Python）。
+发布渠道只使用 GitHub Releases，不再发布 npm 包。
 
 ### 从源码开发
 
@@ -67,7 +67,7 @@ mailbox email mark 123456 --read --account-id my_account_id --folder INBOX --dry
 mailbox email mark 123456 --read --account-id my_account_id --folder INBOX --confirm --json
 
 # 按发件人/主题批量操作（无需先查 UID）
-mailbox email mark --from "support@npmjs.com" --read --confirm --account-id my_account_id --json
+mailbox email mark --from "support@example.com" --read --confirm --account-id my_account_id --json
 mailbox email delete --from "newsletter" --account-id my_account_id --json   # 不带 --confirm 是 dry-run 预览
 mailbox email delete --subject "[ad]" --account-id my_account_id --confirm --json
 
