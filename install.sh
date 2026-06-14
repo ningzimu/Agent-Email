@@ -2,14 +2,15 @@
 # mailbox CLI installer — downloads a prebuilt binary from GitHub Releases.
 # No npm, no Node, no tokens required.
 #
-#   curl -fsSL https://raw.githubusercontent.com/leeguooooo/Mailbox/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
 #
 # Env overrides:
 #   MAILBOX_VERSION=v2.11.2   install a specific tag (default: latest release)
 #   MAILBOX_INSTALL_DIR=...   install dir (default: ~/.local/bin)
+#   MAILBOX_REPO=owner/repo   GitHub repo to download from (default: ningzimu/Agent-Email)
 set -eu
 
-REPO="leeguooooo/Mailbox"
+REPO="${MAILBOX_REPO:-ningzimu/Agent-Email}"
 INSTALL_DIR="${MAILBOX_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${MAILBOX_VERSION:-}"
 

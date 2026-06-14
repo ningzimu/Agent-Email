@@ -4,7 +4,7 @@ description: Read, search, send, and manage email across Gmail, QQ, 163, Outlook
 metadata:
   author: leeguooooo
   version: "0.2.2"
-  homepage: https://github.com/leeguooooo/Mailbox
+  homepage: https://github.com/ningzimu/Agent-Email
 keywords:
   - mailbox
   - email
@@ -31,7 +31,7 @@ includes `success: boolean` and, on failure, `error: string` +
 non-interactively from GitHub Releases (no npm, no auth) before doing anything else:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/Mailbox/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
 # installs the prebuilt binary to ~/.local/bin — make sure that's on PATH, then re-probe
 export PATH="$HOME/.local/bin:$PATH"; mailbox --version
 ```
@@ -59,7 +59,7 @@ To tell whether a command exists, probe `mailbox <cmd> --help --json` and check
 
 ```bash
 # 1. Install the CLI from GitHub Releases (no npm/Node needed; prebuilt binary):
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/Mailbox/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
 #    (npm is deprecated: `npm install -g @leeguoo/mailbox-cli` may lag the releases)
 
 # 2. Configure accounts (edit credentials):
@@ -273,6 +273,6 @@ Measured (Gmail INBOX, M2 MacBook over residential WAN):
 
 ## Reference
 
-- Repo: https://github.com/leeguooooo/Mailbox
+- Repo: https://github.com/ningzimu/Agent-Email
 - npm: https://www.npmjs.com/package/@leeguoo/mailbox-cli
 - JSON contract docs: `docs/CLI_JSON_CONTRACT.md`

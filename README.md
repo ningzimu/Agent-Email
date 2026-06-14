@@ -18,12 +18,12 @@ prebuilt platform binaries via npm (no Python required for end users).
 ### From GitHub Releases (recommended — no npm, no Node)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/Mailbox/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ningzimu/Agent-Email/main/install.sh | sh
 mailbox --help
 ```
 
 Downloads the prebuilt binary for your platform (macOS arm64/x64, Linux x64) from the
-[latest GitHub Release](https://github.com/leeguooooo/Mailbox/releases/latest), verifies its
+[latest GitHub Release](https://github.com/ningzimu/Agent-Email/releases/latest), verifies its
 checksum, and installs to `~/.local/bin`. Pin a version with `MAILBOX_VERSION=v2.11.2`, or
 change the dir with `MAILBOX_INSTALL_DIR=...`.
 
@@ -39,10 +39,10 @@ The npm registry is no longer the primary channel — releases ship as GitHub Re
 
 ```bash
 # Project scope — installs into ./.claude/skills/mailbox (or ./.cursor/skills/...):
-npx skills add leeguooooo/Mailbox --skill mailbox
+npx skills add ningzimu/Agent-Email --skill mailbox
 
 # User scope — installs into ~/.claude/skills/mailbox:
-npx skills add leeguooooo/Mailbox --skill mailbox -g
+npx skills add ningzimu/Agent-Email --skill mailbox -g
 ```
 
 The skill assumes the CLI is on `PATH` (install via the `curl … install.sh | sh` above).
