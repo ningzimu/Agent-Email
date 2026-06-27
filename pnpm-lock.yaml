@@ -57,6 +57,9 @@ importers:
       nodemailer:
         specifier: ^6.9.16
         version: 6.10.1
+      playwright-core:
+        specifier: ^1.61.1
+        version: 1.61.1
       sql.js:
         specifier: ^1.13.0
         version: 1.13.0
@@ -1165,6 +1168,11 @@ packages:
       node-notifier:
         optional: true
 
+  playwright-core@1.61.1:
+    resolution: {integrity: sha512-h7Qlt6m4REp25qvIdvbDtVmD4LqVXfpRxhORv9L0jzETM05p4fuPJ3dKyuSXQxDSbXnmS79HAgi9589lGSpLkg==}
+    engines: {node: '>=18'}
+    hasBin: true
+
   postcss@8.5.6:
     resolution: {integrity: sha512-3Ybi1tAuwAP9s0r1UQ2J4n5Y0G05bJkpUIO0/bI9MhwmD70S5aTWbXGBwxHrelT+XM1k6dM0pk+SwNkpTRN7Pg==}
     engines: {node: ^10 || ^12 || >=14}
@@ -1172,6 +1180,7 @@ packages:
   prebuild-install@7.1.1:
     resolution: {integrity: sha512-jAXscXWMcCK8GgCoHOfIr0ODh5ai8mj63L2nWrjuAgXE6tDyYGnx4/8o/rCgU+B4JSyZBKbeZqzhtwtC3ovxjw==}
     engines: {node: '>=10'}
+    deprecated: No longer maintained. Please contact the author of the relevant native addon; alternatives are available.
     hasBin: true
 
   pretty-ms@9.3.0:
@@ -2586,6 +2595,8 @@ snapshots:
     transitivePeerDependencies:
       - encoding
       - supports-color
+
+  playwright-core@1.61.1: {}
 
   postcss@8.5.6:
     dependencies:

@@ -1380,6 +1380,43 @@ async function main(argv) {
     });
 
   emailCmd
+    .command("cloud-attachments")
+    .description("Download oversized/cloud attachments linked from email body (QQ FTN, NetEase cloud)")
+    .argument("<email_id>", "UID or gid (account_id:folder:uid)")
+    .option("--account-id <id>", "Required if email_id is a bare UID")
+    .option("--folder <name>", "Folder", "INBOX")
+    .option("--out-dir <dir>", "Directory to save files")
+    .option("--provider <name>", "Provider filter: auto, qq, netease", "auto")
+    .option("--force", "Overwrite destination files")
+    .option("--timeout-ms <ms>", "Download timeout per step", "120000")
+    .option("--chrome-path <path>", "Chrome executable path for QQ FTN downloads")
+    .action(async (emailId, opts, cmd) => {
+      const refs = _resolveEmailRefs([emailId], opts.accountId);
+      if (refs.error || !refs.accountId) {
+        const rc = contract.invalidUsage({ message: refs.error || "Missing --account-id (or pass a gid like account_id:folder:uid)", asJson, pretty });
+        process.exit(rc);
+      }
+      const timeoutMs = Number(opts.timeoutMs);
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        const rc = contract.invalidUsage({ message: "--timeout-ms must be a positive number", asJson, pretty });
+        process.exit(rc);
+      }
+      const explicitFolder = _explicitOptionValue(cmd, opts, "folder");
+      const result = await email.downloadCloudAttachments({
+        email_id: refs.ids[0],
+        folder: explicitFolder || refs.refs[0].folder || opts.folder,
+        account_id: refs.accountId,
+        output_dir: opts.outDir || "",
+        provider: opts.provider || "auto",
+        force: Boolean(opts.force),
+        timeout_ms: timeoutMs,
+        chrome_path: opts.chromePath || "",
+      });
+      const rc = contract.handleJsonOrText({ result, asJson, pretty, printText: () => _printTextNotImplemented("email cloud-attachments") });
+      process.exit(rc);
+    });
+
+  emailCmd
     .command("flag")
     .description("Flag/unflag an email")
     .argument("<email_id>", "UID or gid (account_id:uid)")

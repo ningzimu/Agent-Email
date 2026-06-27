@@ -50,4 +50,17 @@ describe("review-fix: <unknown> --help --json must not falsely report success", 
     expect(payload.success).toBe(true);
     expect(payload.help.name).toBe("show");
   });
+
+  it("exposes the cloud-attachments email command", async () => {
+    const root = tmpRoot("help_cloud_attachments");
+    fs.rmSync(root, { recursive: true, force: true });
+    const env = testEnv(root);
+    writeAuthJson(env.MAILBOX_CONFIG_DIR, defaultAuth());
+
+    const r = await execa("node", [mailboxBin(), "email", "cloud-attachments", "--help", "--json"], { reject: false, env });
+    const payload = JSON.parse(r.stdout);
+    expect(payload.success).toBe(true);
+    expect(payload.help.name).toBe("cloud-attachments");
+    expect(payload.help.description).toContain("QQ FTN");
+  });
 });

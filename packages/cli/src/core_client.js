@@ -152,6 +152,7 @@ const MUTATING_FNS = new Set([
   "email.replyEmail",
   "email.forwardEmail",
   "email.downloadAttachments",
+  "email.downloadCloudAttachments",
   "sync.force",
   "sync.init",
   "digest.run",

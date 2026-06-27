@@ -7,6 +7,7 @@ const accounts = require("./accounts");
 const { withImapClient } = require("./imap");
 const { sendMail } = require("./smtp");
 const { formatDateTime, firstAddress, hasAttachmentsFromBodyStructure, attachmentFlags, formatSize } = require("./format");
+const cloudAttachments = require("./cloud_attachments");
 const syncDb = require("../storage/sync_db");
 
 function _isTestMode() {
@@ -1898,6 +1899,81 @@ async function downloadAttachments({ email_id, folder = "INBOX", account_id, out
   });
 }
 
+async function downloadCloudAttachments({
+  email_id,
+  folder = "INBOX",
+  account_id,
+  output_dir = "",
+  force = false,
+  timeout_ms = 120000,
+  chrome_path = "",
+  provider = "auto",
+} = {}) {
+  const detail = await showEmail({
+    email_id,
+    folder,
+    account_id,
+    include_html: true,
+    html_max_len: -1,
+    body_max_len: 0,
+    strip_urls: false,
+  });
+  if (!detail.success) return detail;
+
+  const targetDir = output_dir ? String(output_dir) : paths.getPathConfig().attachmentsDir;
+  fs.mkdirSync(targetDir, { recursive: true });
+
+  let sources = cloudAttachments.extractCloudAttachmentSources(`${detail.html_body || ""}\n${detail.body || ""}`);
+  const selectedProvider = String(provider || "auto").trim().toLowerCase();
+  if (selectedProvider && selectedProvider !== "auto") {
+    sources = sources.filter((s) => {
+      if (selectedProvider === "qq" || selectedProvider === "qq-ftn") return s.provider === "qq-ftn";
+      if (selectedProvider === "netease" || selectedProvider === "netease-cloud" || selectedProvider === "163") return s.provider === "netease-cloud";
+      return s.provider === selectedProvider;
+    });
+  }
+
+  const downloads = [];
+  const failed = [];
+  for (const source of sources) {
+    try {
+      const r = await cloudAttachments.downloadCloudAttachmentSource(source, {
+        outputDir: targetDir,
+        force,
+        timeoutMs: Number(timeout_ms || 120000),
+        chromePath: chrome_path || "",
+      });
+      if (r && r.success === false) failed.push({ provider: source.provider, error: r.error, error_code: r.error_code || "operation_failed" });
+      else downloads.push(r);
+    } catch (e) {
+      failed.push({
+        provider: source.provider,
+        error: e && e.message ? e.message : String(e),
+        error_code: (e && e.code) || "operation_failed",
+      });
+    }
+  }
+
+  const byProvider = {};
+  for (const s of sources) byProvider[s.provider] = (byProvider[s.provider] || 0) + 1;
+
+  return {
+    success: failed.length === 0,
+    email_id: String(email_id),
+    gid: detail.gid || "",
+    folder: detail.folder || _normalizeFolder(folder),
+    account: detail.account,
+    account_id: detail.account_id,
+    output_dir: targetDir,
+    source_count: sources.length,
+    by_provider: byProvider,
+    cloud_attachments: downloads,
+    cloud_attachment_count: downloads.length,
+    failed,
+    failed_count: failed.length,
+  };
+}
+
 // Map user-facing flag_type to IMAP keyword. Unknown values fall through as
 // custom keywords (which any IMAP server may accept or reject) so we don't
 // silently coerce them into \Flagged.
@@ -2172,6 +2248,7 @@ module.exports = {
   forwardEmail,
   listFolders,
   downloadAttachments,
+  downloadCloudAttachments,
   flagEmail,
   moveEmails,
 };

@@ -9,6 +9,7 @@
     "imapflow": "^1.0.0",
     "mailparser": "^3.7.2",
     "nodemailer": "^6.9.16",
+    "playwright-core": "^1.61.1",
     "sql.js": "^1.13.0"
   },
   "devDependencies": {
